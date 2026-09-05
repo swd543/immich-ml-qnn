@@ -30,6 +30,7 @@ EOF
   exit 1
 fi
 
+sha256sum --check --strict docs/ARTIFACT_MANIFEST.sha256
 printf 'image assets ready:\n'
 for path in "${required[@]}"; do
   printf '  %s\n' "$path"

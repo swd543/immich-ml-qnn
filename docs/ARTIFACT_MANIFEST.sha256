@@ -1,0 +1,9 @@
+# QAIRT 2.37.1.250807 image inputs validated on Radxa Dragon Q6A (QCS6490).
+# Generated/proprietary files are intentionally not in git. Run from repo root:
+#   sha256sum --check --strict docs/ARTIFACT_MANIFEST.sha256
+5a45a07c5700efb39db6070bdea0c1c37e48c34a8d3a3de9623fb1b6bca58460  build-headers/QNN/QnnInterface.h
+e33be7a29d55d9f644cac2f8582cc775cb50ada603755a7dc42aa0f837c3d12e  daemon/runtime/libQnnHtp.so
+d8ea1e8e06da5bcfe82f2390750eb8d0e1c48de2d447623ceae95557bdd1e216  daemon/runtime/libQnnHtpV68Stub.so
+96358d3be411b3681863a55d9aa33b3c474375ecc3de6af1890b1bbdcd6237ee  daemon/runtime/libQnnHtpV68Skel.so
+6562f9b492d271811b8cf9c9d22a33ca46e59fd4d7854caf90465144ab459cc4  daemon/models/clipr37_6490.bin
+f39574302e2c96af6bf56bee6e6e08408dc38f0fa77a2aca46c9a09bde78945b  daemon/models/arcface37v6_6490.bin

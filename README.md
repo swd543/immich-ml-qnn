@@ -88,8 +88,9 @@ docker build -t immich-ml-qnn:local .
 The daemon is built against Debian 12 (bookworm) glibc 2.36 so it runs inside
 the pinned stock immich base image (also bookworm). The HTP stub needs
 `libyaml-0-2` and `libatomic1`, which the Dockerfile installs. The staging
-script is deliberately explicit: it never downloads or commits Qualcomm SDK
-artifacts.
+and verification scripts check the untracked header/runtime/context files
+against `docs/ARTIFACT_MANIFEST.sha256`; they never download or commit
+Qualcomm SDK artifacts.
 
 ## Run
 

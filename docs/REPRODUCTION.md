@@ -337,8 +337,10 @@ docker build -t immich-ml-qnn:local .
 
 `stage_image_assets.sh` documents the expected SDK tree and stages exactly
 `libQnnHtp.so`, `libQnnHtpV68Stub.so`, and `libQnnHtpV68Skel.so`. It never
-downloads or commits these files. To use a board-copied runtime instead of the
-SDK copy, run it on the board with `--runtime-root
+downloads or commits these files. It checks every staged header, runtime, and
+context against `docs/ARTIFACT_MANIFEST.sha256`; the full verifier repeats
+that check after the daemon build. To use a board-copied runtime instead of
+the SDK copy, run it on the board with `--runtime-root
 ~/immich-ml-qnn/artifacts/board-runtime` after the headers/models have been
 copied, or replace only `daemon/runtime/` with that archived directory.
 
@@ -511,8 +513,9 @@ upstream-diff.patch                     the 201-line stock diff (mergeable)
 tools/patch_clip_conv1.py               CLIP conv1 → Gemm patch
 tools/compile_htp.py                    DLC → SoC-pinned HTP context binary
 tools/stage_image_assets.sh             stage untracked/proprietary Docker inputs
-tools/verify_image_assets.sh            fail early if a Docker input is absent
+tools/verify_image_assets.sh            fail early on missing/mismatched Docker inputs
 tools/test_npu.py, qnn_*_test.cpp       unit/integration harnesses
+docs/ARTIFACT_MANIFEST.sha256           hashes of validated untracked inputs
 docs/REPRODUCTION.md                    this file
 STATE.md                                session continuity + SCRFD-block evidence
 README.md                               overview

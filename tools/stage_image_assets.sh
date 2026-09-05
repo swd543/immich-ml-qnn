@@ -59,5 +59,6 @@ install -m 0644 "$dsp_lib/libQnnHtpV68Skel.so" daemon/runtime/
 install -m 0644 "$clip" daemon/models/clipr37_6490.bin
 install -m 0644 "$arcface" daemon/models/arcface37v6_6490.bin
 
+sha256sum --check --strict docs/ARTIFACT_MANIFEST.sha256
 printf '%s\n' 'staged headers, HTP runtime, and context binaries.'
 printf '%s\n' 'Next: build daemon/qnn_dsp_daemon_bookworm, then run tools/verify_image_assets.sh.'
