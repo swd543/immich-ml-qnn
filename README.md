@@ -6,6 +6,14 @@ everything else (text encoder, SCRFD face detection, OCR) stays on the CPU
 (ONNX Runtime) — the same split as stock Immich, with the two heaviest
 per-image models offloaded to the NPU.
 
+## Quickstart (full guide)
+
+**`docs/REPRODUCTION.md`** is the end-to-end reproduction guide: toolchain
+setup, exact model conversion (QAIRT 2.37.1 → INT8 → SoC-pinned context
+binaries, with the CLIP conv1→Gemm patch), daemon build (bookworm glibc),
+image build, production deployment (incl. the compose-v1 workaround),
+verification checklist, and every failure mode with its fix.
+
 ## Architecture
 
 ```
