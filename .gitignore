@@ -11,3 +11,11 @@ swap-backup/
 __pycache__/
 *.pyc
 *.o
+
+# board scratch (deployment dir doubles as work area)
+rt6490/
+sdkrun/
+immich-ml-qnn.bundle
+tools/qnn_hand_test
+tools/qnn_meta_test
+tools/qnn_sys_introspector
