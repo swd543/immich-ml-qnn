@@ -528,9 +528,7 @@ int main(int argc, char** argv) {
   if (arcOutOff > -0.5) arcSpec.outOffset = static_cast<int32_t>(arcOutOff);
   gTensorDataFormat = dataFormat;
 
-  size_t before = g_models.size();
   if (!clipCtx.empty()) loadModel(&clipSpec, clipCtx);
-  before = g_models.size();
   if (!arcCtx.empty()) loadModel(&arcSpec, arcCtx);
   if (g_models.size() == 0) {
     logmsg("ERR", "no models loaded — exiting");
