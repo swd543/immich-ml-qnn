@@ -1,0 +1,13 @@
+# Large / regeneratable artifacts (persist on the board at
+# /home/buga/immich-ml-qnn/{artifacts,daemon/runtime,daemon/models})
+artifacts/
+build-headers/
+daemon/runtime/
+daemon/models/
+daemon/qnn_dsp_daemon
+daemon/qnn_dsp_daemon_bookworm
+daemon/qnn_dsp_daemon_static
+swap-backup/
+__pycache__/
+*.pyc
+*.o
