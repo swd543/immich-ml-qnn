@@ -12,8 +12,8 @@
 // Tensor ground truth (from qairt-dlc-info on the quantized DLCs):
 //   clip    graph "clipr37":   in "image"    [1,3,224,224] uFxp_8 scale 0.015443762764 off -116
 //                               out "embedding" [1,512]   uFxp_8 scale 0.003277973738 off -207
-//   arcface graph "arcface37": in "input.1"  [1,3,112,112] uFxp_8 scale 0.006889658049 off -136
-//                               out "683"        [1,512]   uFxp_8 scale 0.015603637323 off -123
+//   arcface graph "arcface37": in "input_1" [1,3,112,112] uFxp_8 scale 0.006889658049 off -136
+//                               out "_683"       [1,512]   uFxp_8 scale 0.015603637323 off -123
 //
 // Build:
 //   g++ -O2 -std=c++17 -Wall -I<qairst-include> qnn_dsp_daemon.cpp -o qnn_dsp_daemon -ldl -lpthread

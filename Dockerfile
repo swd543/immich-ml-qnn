@@ -11,7 +11,9 @@
 # Build (on the board):
 #   docker build -t immich-ml-qnn:local .
 
-ARG IMMICH_ML_BASE=ghcr.io/immich-app/immich-machine-learning:release
+# Verified production base: Immich ML v3.1.0. Pin the digest so a rebuild does
+# not silently pick up a different moving `release` image.
+ARG IMMICH_ML_BASE=ghcr.io/immich-app/immich-machine-learning@sha256:5a0839dc5303cd7215bcd2180a26aed3af41675aefb3e75e5157e9f10ad16e6e
 FROM ${IMMICH_ML_BASE}
 
 # Libraries the QNN HTP stub requires that the stock image lacks.

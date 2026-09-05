@@ -40,9 +40,12 @@ MODELS: dict[str, dict[str, Any]] = {
         "out_shape": (1, 512),
     },
     "arcface": {
-        "in_name": "input.1",
+        # Names from arcface37v6_6490.bin, not the source ONNX. QnnSession
+        # ignores feed/output names internally today, but exposing the actual
+        # context contract keeps callers and future validation correct.
+        "in_name": "input_1",
         "in_shape": (1, 3, 112, 112),
-        "out_name": "683",
+        "out_name": "_683",
         "out_shape": (1, 512),
     },
 }
@@ -50,13 +53,15 @@ MODELS: dict[str, dict[str, Any]] = {
 # (model_type, model_task) -> (daemon model key, set of model names backed by a
 # QNN context binary shipped in the daemon).
 #   * clip ViT-B/32__openai : clip_visual.onnx -> clipr37_6490.bin (INT8)
-#   * buffalo_l / buffalo_m / antelopev2 : w600k_r50 recognition model
-#     -> arcface37v6_6490.bin (INT8). (buffalo_s uses w600k_mbf: not covered.)
+#   * buffalo_l only: w600k_r50 recognition model -> arcface37v6_6490.bin
+#     (INT8). Other InsightFace bundles must stay on ORT unless separately
+#     converted and validated; silently substituting buffalo_l weights would
+#     produce incompatible embeddings.
 _QNN_ROUTES: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
     ("visual", "clip"): ("clip", frozenset({"ViT-B-32__openai"})),
     ("recognition", "facial-recognition"): (
         "arcface",
-        frozenset({"buffalo_l", "buffalo_m", "antelopev2"}),
+        frozenset({"buffalo_l"}),
     ),
 }
 

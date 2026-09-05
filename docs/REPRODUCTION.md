@@ -54,7 +54,7 @@ SDK=~/qairt/qairt/2.37.1.250807
 uv python install 3.10
 uv venv qairt-env --python 3.10
 uv pip install --python qairt-env/bin/python \
-    numpy==1.26.4 onnx==1.14.1 onnxruntime paramiko
+    numpy==1.26.4 onnx==1.14.1 onnxruntime paramiko huggingface_hub
 # numpy 1.26.4 is MANDATORY for qairt-converter in this SDK release.
 # (the uv venv has no `pip`; use `uv pip install --python <venv>/bin/python`)
 
@@ -77,15 +77,23 @@ $PY $SDK/bin/x86_64-linux-clang/qairt-converter --help | head -3   # prints help
 
 ## 3. The exact Immich models
 
-Immich downloads these into its ML container's cache; extract the ONNX from
-the running production container (or the stock image):
+Download the exact public Immich model repositories on the **build host**.
+This avoids a circular dependency on an already-running ML container:
 
 ```sh
-# on the board (paths inside the stock immich-ml container, v3.1.0):
-docker exec immich-ml sh -c 'ls /cache/clip/ViT-B-32__openai/visual /cache/facial-recognition/buffalo_l/recognition'
-docker cp immich-ml:/cache/clip/ViT-B-32__openai/visual/model.onnx  clip_visual.onnx
-docker cp immich-ml:/cache/facial-recognition/buffalo_l/recognition/model.onnx arcface_model.onnx
+$PY - <<'EOF'
+from huggingface_hub import snapshot_download
+snapshot_download("immich-app/ViT-B-32__openai", local_dir="models/clip")
+snapshot_download("immich-app/buffalo_l", local_dir="models/buffalo_l")
+EOF
+cp models/clip/visual/model.onnx clip_visual.onnx
+cp models/buffalo_l/recognition/model.onnx arcface_model.onnx
 ```
+
+The equivalent cache paths in a running Immich container are
+`/cache/clip/ViT-B-32__openai/visual/model.onnx` and
+`/cache/facial-recognition/buffalo_l/recognition/model.onnx`; these are useful
+for comparison, not required for the build.
 
 - **CLIP visual** = `ViT-B-32__openai` (open_clip). Input `image` [1,3,224,224]
   float32 (Immich preprocesses: resize+center-crop 224, `(x/255 - mean)/std`
@@ -157,8 +165,8 @@ $PY $SDK/bin/x86_64-linux-clang/qairt-quantizer \
 # expect: 0 ERROR lines
 
 # 3) compile → HTP context binary (SoC-pinned)
-$PY tools/compile_htp.py clipr37_q.dlc clipr37 2 .
-# WROTE ./clipr37.bin  (~90 MB)
+$PY tools/compile_htp.py clipr37_q.dlc clipr37 2 . clipr37_6490
+# WROTE ./clipr37_6490.bin  (~90 MB)
 ```
 
 ### 5.2 ArcFace (w600k_r50)
@@ -173,8 +181,8 @@ $PY $SDK/bin/x86_64-linux-clang/qairt-quantizer \
   -l arcface_calib.txt --act_bitwidth 8 --weights_bitwidth 8 \
   --use_per_channel_quantization --target_backend HTP
 
-$PY tools/compile_htp.py arcface37v6_q.dlc arcface37 2 .
-# WROTE ./arcface37.bin
+$PY tools/compile_htp.py arcface37v6_q.dlc arcface37 2 . arcface37v6_6490
+# WROTE ./arcface37v6_6490.bin
 ```
 
 ### 5.3 Ground-truth references (do this BEFORE deploying anything)
@@ -185,7 +193,7 @@ these are the bit-exact references the daemon is later verified against:
 ```sh
 $SDK/bin/x86_64-linux-clang/qnn-net-run \
   --backend $SDK/lib/x86_64-linux-clang/libQnnHtp.so \
-  --retrieve_context clipr37.bin \
+  --retrieve_context clipr37_6490.bin \
   --input_list clip_test_in.txt \
   --output_dir clipout/
 md5sum clipout/Result_0/embedding.raw
@@ -193,7 +201,7 @@ md5sum clipout/Result_0/embedding.raw
 
 $SDK/bin/x86_64-linux-clang/qnn-net-run \
   --backend $SDK/lib/x86_64-linux-clang/libQnnHtp.so \
-  --retrieve_context arcface37.bin \
+  --retrieve_context arcface37v6_6490.bin \
   --input_list arcface_test_in.txt \
   --output_dir faceout/
 md5sum faceout/Result_0/_683.raw
@@ -253,14 +261,15 @@ container **on the board**:
 # on the board, from the repo checkout (~/immich-ml-qnn):
 docker run --rm -v "$PWD":/src -w /src debian:bookworm bash -c '
   apt-get update && apt-get install -y --no-install-recommends g++ &&
-  g++ -O2 -std=c++17 -pthread -o qnn_dsp_daemon_bookworm \
-      daemon/qnn_dsp_daemon.cpp &&
-  ldd qnn_dsp_daemon_bookworm'
-# result → daemon/qnn_dsp_daemon_bookworm (committed to daemon/)
+  g++ -O2 -std=c++17 -Wall -Ibuild-headers daemon/qnn_dsp_daemon.cpp \
+      -o daemon/qnn_dsp_daemon_bookworm -ldl -pthread &&
+  ldd daemon/qnn_dsp_daemon_bookworm'
+# result → daemon/qnn_dsp_daemon_bookworm (generated and gitignored)
 ```
 
-(Only the QNN C headers from the SDK are needed at build time; the daemon
-links nothing QNN-specific — the backend `.so` is loaded at runtime.)
+`build-headers/QNN` is staged from the QAIRT SDK by §7. The daemon links no
+QNN library: the backend `.so` is loaded with dlopen at runtime, hence `-ldl`.
+The generated binary is deliberately not committed to this public repo.
 
 ### 6.2 Runtime dependencies
 
@@ -283,7 +292,7 @@ links nothing QNN-specific — the backend `.so` is loaded at runtime.)
 
 ```dockerfile
 # (abridged — full file in the repo root)
-ARG IMMICH_ML_BASE=ghcr.io/immich-app/immich-machine-learning:release
+ARG IMMICH_ML_BASE=ghcr.io/immich-app/immich-machine-learning@sha256:5a0839dc5303cd7215bcd2180a26aed3af41675aefb3e75e5157e9f10ad16e6e
 FROM ${IMMICH_ML_BASE}
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libyaml-0-2 libatomic1 && rm -rf /var/lib/apt/lists/*
@@ -296,12 +305,44 @@ ENV IMMICH_ML_QNN_PORT=8089
 ENTRYPOINT ["tini", "--", "/entrypoint-qnn.sh"]
 ```
 
+### 7.1 Stage untracked image assets (required after every clean clone)
+
+The public repository **does not ship** Qualcomm SDK/runtime files or generated
+context binaries. This avoids redistributing proprietary SDK artifacts and
+keeps ~134 MB of regenerable binaries out of git. Before building, stage the
+three runtime files, QNN headers, and the two contexts generated in §5:
+
 ```sh
-# build on the board (the image pulls from ghcr.io; buildkit required):
-cd ~/immich-ml-qnn && docker build -t immich-ml-qnn:local .
+# On the BUILD HOST (where the x86 QAIRT SDK and contexts from §5 exist):
+cd ~/immich-ml-qnn
+tools/stage_image_assets.sh \
+  --sdk "$SDK" \
+  --clip /path/to/clipr37_6490.bin \
+  --arcface /path/to/arcface37v6_6490.bin
+
+# Copy the staged assets to the BOARD clone. If the board's known-good runtime
+# was archived at artifacts/board-runtime, it may replace daemon/runtime/ here.
+scp -r build-headers daemon/runtime daemon/models buga@radxa.local:/home/buga/immich-ml-qnn/
+
+# On the BOARD: build the aarch64 daemon for the Debian-12 image, then assert
+# every Docker COPY input exists before the image build.
+cd ~/immich-ml-qnn
+docker run --rm -v "$PWD":/src -w /src debian:bookworm bash -c '
+  apt-get update && apt-get install -y --no-install-recommends g++ &&
+  g++ -O2 -std=c++17 -Wall -Ibuild-headers daemon/qnn_dsp_daemon.cpp \
+    -o daemon/qnn_dsp_daemon_bookworm -ldl -pthread'
+tools/verify_image_assets.sh
+docker build -t immich-ml-qnn:local .
 ```
 
-### 7.1 The Python patch (upstream-mergeable, 201-line diff)
+`stage_image_assets.sh` documents the expected SDK tree and stages exactly
+`libQnnHtp.so`, `libQnnHtpV68Stub.so`, and `libQnnHtpV68Skel.so`. It never
+downloads or commits these files. To use a board-copied runtime instead of the
+SDK copy, run it on the board with `--runtime-root
+~/immich-ml-qnn/artifacts/board-runtime` after the headers/models have been
+copied, or replace only `daemon/runtime/` with that archived directory.
+
+### 7.2 The Python patch (upstream-mergeable, 201-line diff)
 
 Only two files differ from stock `immich-ml` v3.1.0
 (`upstream-diff.patch` in the repo root):
@@ -336,8 +377,8 @@ docker run -d \
   --restart unless-stopped \
   --network immich_default \
   --network-alias immich-ml \
-  -e COMPOSE_PROJECT_NAME=immich -e COMPOSE_SERVICE=immich-ml \
-  -e COMPOSE_VERSION=3.8 \
+  --label com.docker.compose.project=immich \
+  --label com.docker.compose.service=immich-ml \
   -e IMMICH_ML_QNN_URL=http://127.0.0.1:8089 \
   --device /dev/fastrpc-cdsp \
   -v /proc/device-tree:/proc/device-tree:ro \
@@ -460,15 +501,17 @@ Run after any change (binaries, daemon, image, deployment):
 
 ### Repo (this one)
 ```
-Dockerfile, docker/entrypoint-qnn.sh    image + startup
+Dockerfile, docker/entrypoint-qnn.sh    image + startup (pinned base digest)
 daemon/qnn_dsp_daemon.cpp               daemon source
-daemon/qnn_dsp_daemon_bookworm          built aarch64 binary (bookworm glibc)
-daemon/runtime/                         Radxa v2.37.1 HTP runtime (libQnnHtp.so, skels, stub)
-daemon/models/*.bin                     INT8 context binaries
+build-headers/, daemon/qnn_dsp_daemon_bookworm,
+daemon/runtime/, daemon/models/          generated/proprietary image inputs; gitignored,
+                                        staged by tools/stage_image_assets.sh
 immich_ml/                              full package (only base.py + sessions/qnn.py differ)
 upstream-diff.patch                     the 201-line stock diff (mergeable)
 tools/patch_clip_conv1.py               CLIP conv1 → Gemm patch
 tools/compile_htp.py                    DLC → SoC-pinned HTP context binary
+tools/stage_image_assets.sh             stage untracked/proprietary Docker inputs
+tools/verify_image_assets.sh            fail early if a Docker input is absent
 tools/test_npu.py, qnn_*_test.cpp       unit/integration harnesses
 docs/REPRODUCTION.md                    this file
 STATE.md                                session continuity + SCRFD-block evidence
@@ -496,6 +539,7 @@ code/ffclone/                           ffclone git repo (branches: main = pre-Q
 - this repo: GitHub remote `git@github.com:swd543/immich-ml-qnn.git`.
 - a git bundle of this repo also lives on the board at
   `/home/buga/immich-ml-qnn/immich-ml-qnn.bundle`.
-- Large regenerable binaries (models ~128 MB, runtime ~11 MB) are gitignored;
-  they live in `daemon/{runtime,models}` on disk and in
-  `/home/buga/immich-ml-qnn/artifacts/` on the board.
+- Large regenerable binaries (models ~134 MB, runtime ~11 MB), QNN headers,
+  and the bookworm daemon binary are gitignored. A fresh clone must stage them
+  with `tools/stage_image_assets.sh`; durable board copies live in
+  `/home/buga/immich-ml-qnn/artifacts/`.

@@ -55,26 +55,41 @@ immich-ml  (patched, this image)
 ## Files
 
 ```
-Dockerfile                  image build (FROM stock immich-machine-learning)
-daemon/qnn_dsp_daemon.cpp   the daemon source (single file)
-daemon/qnn_dsp_daemon_bookworm  aarch64 binary built against Debian 12 glibc
-daemon/runtime/             Qualcomm HTP runtime (libQnnHtp.so, skel, stub, …)
-daemon/models/              INT8 context binaries (clipr37_6490.bin, arcface37v6_6490.bin)
+Dockerfile                  image build (pinned Immich ML v3.1.0 digest)
+daemon/qnn_dsp_daemon.cpp   daemon source (single file)
 docker/entrypoint-qnn.sh    starts the daemon (if env set) then the ML server
 immich_ml/                  patched package (only models/base.py + sessions/qnn.py differ)
-tools/                      test/harness scripts
+tools/                      conversion, staging, verification and test tools
+
+generated / gitignored image inputs (not shipped by this public repo):
+build-headers/QNN/          QAIRT headers for the bookworm daemon build
+daemon/qnn_dsp_daemon_bookworm  aarch64 binary built against Debian 12 glibc
+daemon/runtime/             Qualcomm HTP runtime (3 files)
+daemon/models/              generated INT8 contexts (clipr37_6490.bin, arcface37v6_6490.bin)
 ```
 
 ## Build (on the board)
 
+A clean clone needs generated/proprietary image inputs staged before a Docker
+build. After producing the two contexts, stage the headers/runtime/models on
+the **build host** and copy them to the board exactly as documented in
+**`docs/REPRODUCTION.md` §7.1**. Then, on the board:
+
 ```sh
 cd /home/buga/immich-ml-qnn
+docker run --rm -v "$PWD":/src -w /src debian:bookworm bash -c '
+  apt-get update && apt-get install -y --no-install-recommends g++ &&
+  g++ -O2 -std=c++17 -Wall -Ibuild-headers daemon/qnn_dsp_daemon.cpp \
+    -o daemon/qnn_dsp_daemon_bookworm -ldl -pthread'
+tools/verify_image_assets.sh
 docker build -t immich-ml-qnn:local .
 ```
 
 The daemon is built against Debian 12 (bookworm) glibc 2.36 so it runs inside
-the stock immich base image (also bookworm). The HTP stub needs
-`libyaml-0-2` and `libatomic1`, which the Dockerfile installs.
+the pinned stock immich base image (also bookworm). The HTP stub needs
+`libyaml-0-2` and `libatomic1`, which the Dockerfile installs. The staging
+script is deliberately explicit: it never downloads or commits Qualcomm SDK
+artifacts.
 
 ## Run
 

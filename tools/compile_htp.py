@@ -17,19 +17,21 @@ The resulting .bin is loaded with QnnContext_createFromBinary by the
 qnn-dsp-daemon (or qnn-net-run for ground-truth references).
 
 Usage:
-    python compile_htp.py <model.dlc> <graph_name> [vtcm_mb] [out_dir]
+    python compile_htp.py <model.dlc> <graph_name> [vtcm_mb] [out_dir] [output_stem]
 
 Defaults: vtcm_mb=2 (8 MB VTCM on QCS6490, 2 MB per graph is the working
-setting used for the production CLIP + ArcFace binaries), out_dir=<cwd>.
+setting used for the production CLIP + ArcFace binaries), out_dir=<cwd>, and
+output_stem=<graph_name>. Pass the production output stems explicitly:
+`clipr37_6490` and `arcface37v6_6490`.
 
 Environment:
     QNN_SDK_ROOT    SDK root (required for the save step)
     LD_LIBRARY_PATH must include <SDK>/lib/x86_64-linux-clang and the
                     venv python's lib dir (libpython3.10.so.1.0)
 
-The compiled file is written as <out_dir>/<dlc_stem>.bin (the API uses the
-DLC's own module name) and renamed to <out_dir>/<graph_name>.bin by this
-script so each model has a stable, explicit name.
+The QAIRT API initially writes <out_dir>/<dlc_stem>.bin (the DLC's own module
+name). This script renames it to <out_dir>/<output_stem>.bin so image assets
+always have stable, explicit names.
 """
 import glob
 import os
@@ -44,6 +46,7 @@ def main() -> None:
     dlc, graph = sys.argv[1], sys.argv[2]
     vtcm = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else 2
     out_dir = sys.argv[4] if len(sys.argv) > 4 else os.getcwd()
+    output_stem = sys.argv[5] if len(sys.argv) > 5 else graph
 
     # The qairt package's argparser-based entrypoints sniff sys.argv; the
     # API path we use here does not want it.
@@ -66,7 +69,7 @@ def main() -> None:
     compiled.save(out_dir)
     stem = os.path.splitext(os.path.basename(dlc))[0]
     produced = os.path.join(out_dir, stem + ".bin")
-    final = os.path.join(out_dir, graph + ".bin")
+    final = os.path.join(out_dir, output_stem + ".bin")
     shutil.move(produced, final)
     print(f"WROTE {final} ({os.path.getsize(final)} bytes)")
 
