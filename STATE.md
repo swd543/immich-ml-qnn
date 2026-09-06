@@ -95,3 +95,33 @@ maxdiff 1.51 vs ORT for the ConvTranspose attempt). SCRFD's multi-scale anchor b
   fresh 2.37.1 SDK at `sdk-237/`, work dir at `work/` (incl. `work/scrfd/` artifacts).
 - Board `/tmp` is tmpfs — wiped on reboot; test .bin files removed, old test containers
   (iml-inspect, npu-probe) removed by name.
+
+## STT/TTS NPU investigation (2026-09-06) — see docs/NPU-ASR-TTS.md
+
+Single-op probe campaign (5 new ops) → **all registered + executed on this
+firmware**: Gather, ConvTranspose(2D), Conv-3D (1-D conv), InstanceNorm, Pad.
+Combined with the production-proven set, the full op set of **Whisper** (STT)
+and **Piper/VITS** (TTS) is available on QCS6490 HTP v68; only Resize remains
+blocked (SCRFD finding) and neither model needs it.
+
+Key findings:
+- AI Hub has **no** precompiled speech assets for QCS6490 (current + all past
+  releases; CLI `find`), and current audio assets are QAIRT-2.45 builds (op
+  packages above this firmware's 2.32 interface cap). → compile from source
+  with QAIRT 2.37.1 only.
+- Piper's official ONNX contains dynamic ops (RandomNormalLike, NonZero,
+  ScatterND, dynamic Slice/Where) → must use Qualcomm's open fixed-shape
+  `pipertts_en` export recipe (ai-hub-models repo) + our pipeline.
+- STT first target: distil-whisper-small.en (encoder-only, single forward)
+  or whisper-base; TTS first target: piper EN (e.g. en_US-lessac-medium).
+
+Board-side load-test gotchas (reusable):
+- fastrpc needs root/render → run qnn-net-run tests with sudo (RADXA_SUDO in
+  vllm-setup/.env).
+- rt6490/qnn-net-run is v2.42 (mismatched with the 2.37.1 Radxa runtime →
+  fastrpc 0x72); use SDK `bin/aarch64-ubuntu-gcc9.4/qnn-net-run` + Radxa
+  2.37.1 libQnnHtp*.so; SDK prebuilt stub/skel are unsigned →
+  "unsigned PD not supported" on this board.
+- Probe workspace: board `/home/buga/immich-ml-qnn/probe-asr-tts/` (22 MB),
+  host `~/qairt/work/probes/`.
+- CDSP stayed attached; production immich-ml daemon untouched throughout.
