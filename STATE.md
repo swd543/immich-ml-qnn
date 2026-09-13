@@ -214,7 +214,8 @@ The VTCM root-cause fix (above) led to the full SCRFD-on-NPU rollout:
 7. **Deployment**: image `immich-ml-qnn:local` (rollback:
    `immich-ml-qnn:rollback-20260913`), container recreated with the same
    `docker run` args; `/health` reports all 3 models; all 7 containers
-   healthy.
+   healthy. (Superseded 2026-09-13 — current image/rollback/compose state:
+   see "2026-09-13 hardening (commit a3155b3)" below.)
 
 ### Bugs found and fixed in this rollout (lessons)
 - **Dangling `dimensions` pointer**: `makeTensor` must take
@@ -351,6 +352,13 @@ The VTCM root-cause fix (above) led to the full SCRFD-on-NPU rollout:
 - **Container**: `--restart unless-stopped` (was `no` — ML did not survive a
   board reboot), compose labels `com.docker.compose.project=immich` /
   `com.docker.compose.service=immich-ml` so the compose stack owns it.
+  Since then the container is **compose-owned** (the ffclone/qnn compose file
+  defines the `immich-ml` service with the identical config — image via
+  `IMMICH_ML_IMAGE`, QNN URL, `--device /dev/fastrpc-cdsp`, 4 ro binds + rw
+  cache, `restart: unless-stopped`); a project-wide `immichctl restart`
+  recreates it from compose (verified 2026-09-13: all 3 models reloaded,
+  15-face predict OK). The manual `docker run` in this doc is only needed
+  when the compose service is absent.
 - **CDSP-wedge fix**: the abrupt-daemon-death path is gone. Verified
   `docker stop` teardown logs: `contextFree(scrfd)=0x0 contextFree(arcface)=0x0
   contextFree(clip)=0x0 deviceFree=0x0 backendFree=0x0`, board healthy
