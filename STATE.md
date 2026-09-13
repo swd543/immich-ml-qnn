@@ -305,3 +305,39 @@ The VTCM root-cause fix (above) led to the full SCRFD-on-NPU rollout:
   pgvector `invalid input syntax for type vector`. Fixed to `np.concatenate`
   along axis 0 (= ORT semantics). Verified in production: 13-face photo ->
   13 x flat-512 embeddings via the NPU.
+
+## 2026-09-13 (afternoon) — ops findings + production state
+
+### Production image
+- `immich-ml-qnn:local` = `sha256:6133792772919882d85e0339a2685be82a53bf74fffb1cc322faf50152ba6a24`
+  (includes the qnn.py batch fix c84b810). Rollback: `immich-ml-qnn:rollback-20260913`.
+- Container: `--device /dev/fastrpc-cdsp` + network `immich_default` + 5 binds +
+  `IMMICH_ML_DEVICE=cpu` + `IMMICH_ML_QNN_URL=http://127.0.0.1:8089`.
+
+### NPU vs CPU ArcFace: expected INT8 floor, not a bug
+- Same 112x112 crop, identical normalized input: NPU daemon `/infer/arcface` vs
+  stock ORT on `buffalo_l/recognition/model.onnx` -> cosine 0.958, mean|diff| 0.24.
+- That matches the prediction from per-element INT8 quant noise alone
+  (~0.968 for a 512-d vec, norm ~22, output step ~0.19) -> dequantization is
+  correct; 0.95x cross-backend cosine is the floor of this quantization.
+- Consequence: embeddings written by CPU mode and NPU mode interoperate for
+  matching (drift << inter-person distance ~0.4+), but a `force` recognition
+  re-run on one backend is the clean way to homogenize a mixed corpus.
+
+### Person clustering on v3.2 (why "few people"): minFaces
+- `machineLearning.facialRecognition.minFaces = 3` (default). A face only joins
+  or creates a person with >= 3 matches within maxDistance; fewer -> deferred
+  (re-queued with deferred=true) -> if still < 3, it returns Success WITHOUT
+  assignment. Deferred faces get absorbed later (new imports, nightly pass, or
+  a force re-run).
+- First import batch (group photos + WhatsApp videos, mostly small faces):
+  61 faces -> 6 persons, 44 faces unassigned = expected, not a detection bug
+  (NPU sweep at minScore 0.3 found the same face set as stored).
+- Client gotchas: the People screen shows persons, not assets; assets without
+  EXIF dates (WhatsApp mp4/webp, scans, PNGs) land in the 1970/"unknown"
+  bucket at the bottom of the descending timeline.
+
+### Queue re-run (canonical, v3.2.0 / BullMQ 5.81.3)
+- `PUT /api/jobs/<faceDetection|facialRecognition|smartSearch|ocr|thumbnailGeneration>`
+  body `{"command":"start","force":false}` with x-api-key. Facial-recognition
+  `force:true` unassigns + re-clusters (use only after deliberate changes).
