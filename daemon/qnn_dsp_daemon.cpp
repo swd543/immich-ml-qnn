@@ -57,11 +57,21 @@ static void logmsg(const char* lvl, const char* fmt, ...) {
 }
 
 // ------------------------------------------------------- model descriptors --
+// Per-output tensor spec (used for multi-output graphs such as SCRFD, which
+// emits score/box/kps tensors for each FPN level).
+struct OutSpec {
+  const char* name;
+  uint32_t dims[4];   // rank 2 here: {d0, d1, 1, 1}
+  float scale;
+  int32_t offset;
+  uint32_t id;        // tensor id from context binary metadata
+};
+
 struct ModelSpec {
   const char* key;          // endpoint name
   const char* graphName;    // graph name inside the context binary
   const char* inName;       // graph input tensor name
-  const char* outName;      // graph output tensor name
+  const char* outName;      // graph output tensor name (single-output models)
   uint32_t inDims[4];
   uint32_t outDims[2];
   float inScale;
@@ -70,6 +80,8 @@ struct ModelSpec {
   int32_t outOffset;
   uint32_t inId;   // tensor id from context binary metadata
   uint32_t outId;
+  const OutSpec* outs;     // multi-output list (null for single-output models)
+  int numOuts;             // 0 = single output (legacy fields above)
 };
 
 struct Model {
@@ -78,11 +90,15 @@ struct Model {
   Qnn_ContextHandle_t ctx = nullptr;
   Qnn_GraphHandle_t graph = nullptr;
   std::vector<uint32_t> inDims;   // stable storage for tensor dims
-  std::vector<uint32_t> outDims;
   Qnn_Tensor_t inTensor{};
-  Qnn_Tensor_t outTensor{};
+  std::vector<uint32_t> outDimsList;  // per-output dims (stable storage)
+  std::vector<Qnn_Tensor_t> outTensors;
+  std::vector<std::vector<uint8_t>> outBufs;  // int8 output per tensor (1 byte/elem)
+  std::vector<float> outScales;
+  std::vector<int32_t> outOffsets;
+  std::vector<size_t> outElemsList;
+  size_t outElemsTotal = 0;
   std::vector<uint8_t> inBuf;     // int8 input  (1 byte/elem)
-  std::vector<uint8_t> outBuf;    // int8 output (1 byte/elem)
   uint64_t runs = 0;
   double lastMs = 0.0;
 };
@@ -107,9 +123,12 @@ static void onSignal(int) { g_running = false; }
 // validates against this value, so it must be mirrored exactly.
 static uint32_t gTensorDataFormat = 1032;
 static bool gNoDevice = false;
+// NB: `dims` must point at caller-owned storage that outlives the tensor —
+// the QNN backend dereferences dimensions during graphExecute.
 static Qnn_Tensor_t makeTensor(const char* name,
                                Qnn_TensorType_t type,
-                               const std::vector<uint32_t>& dims,
+                               const uint32_t* dims,
+                               uint32_t rank,
                                float scale,
                                int32_t offset,
                                uint8_t* buf,
@@ -127,8 +146,8 @@ static Qnn_Tensor_t makeTensor(const char* name,
   t.v1.quantizeParams.quantizationEncoding = QNN_QUANTIZATION_ENCODING_SCALE_OFFSET;
   t.v1.quantizeParams.scaleOffsetEncoding.scale = scale;
   t.v1.quantizeParams.scaleOffsetEncoding.offset = offset;
-  t.v1.rank = static_cast<uint32_t>(dims.size());
-  t.v1.dimensions = const_cast<uint32_t*>(dims.data());
+  t.v1.rank = rank;
+  t.v1.dimensions = const_cast<uint32_t*>(dims);
   t.v1.memType = QNN_TENSORMEMTYPE_RAW;
   t.v1.clientBuf.data = buf;
   t.v1.clientBuf.dataSize = static_cast<uint32_t>(bytes);
@@ -178,22 +197,59 @@ static bool loadModel(const ModelSpec* spec, const std::string& path) {
   }
 
   m.inDims.assign(spec->inDims, spec->inDims + 4);
-  m.outDims.assign(spec->outDims, spec->outDims + 2);
-  size_t inElems = vol(m.inDims), outElems = vol(m.outDims);
+  size_t inElems = vol(m.inDims);
   m.inBuf.resize(inElems);
-  m.outBuf.resize(outElems);
+  m.inTensor = makeTensor(spec->inName, QNN_TENSOR_TYPE_APP_WRITE, m.inDims.data(), 4,
+                          spec->inScale, spec->inOffset, m.inBuf.data(), inElems, spec->inId);
 
-  m.inTensor = makeTensor(spec->inName, QNN_TENSOR_TYPE_APP_WRITE, m.inDims, spec->inScale,
-                          spec->inOffset, m.inBuf.data(), inElems, spec->inId);
-  m.outTensor = makeTensor(spec->outName, QNN_TENSOR_TYPE_APP_READ, m.outDims, spec->outScale,
-                           spec->outOffset, m.outBuf.data(), outElems, spec->outId);
+  // Output tensors: a single-output model is the 1-element case of the same
+  // path (bit-identical response layout to the original single-output code).
+  int nOut = spec->numOuts > 0 ? spec->numOuts : 1;
+  m.outTensors.resize(static_cast<size_t>(nOut));
+  m.outBufs.resize(static_cast<size_t>(nOut));
+  m.outScales.resize(static_cast<size_t>(nOut));
+  m.outOffsets.resize(static_cast<size_t>(nOut));
+  m.outElemsList.resize(static_cast<size_t>(nOut));
+  // Rank-2 outputs: dims live in outDimsList at [2*i, 2*i+2) — stable for the
+  // model's lifetime (reserve() up front so push_back never relocates), so the
+  // tensors' dimensions pointers stay valid.
+  m.outDimsList.reserve(static_cast<size_t>(nOut) * 2);
+  for (int i = 0; i < nOut; ++i) {
+    const uint32_t* od;
+    if (spec->outs && spec->numOuts > 0) {
+      m.outDimsList.push_back(spec->outs[i].dims[0]);
+      m.outDimsList.push_back(spec->outs[i].dims[1]);
+    } else {
+      m.outDimsList.push_back(spec->outDims[0]);
+      m.outDimsList.push_back(spec->outDims[1]);
+    }
+    od = &m.outDimsList.back() - 1;
+    size_t oelems = static_cast<size_t>(od[0]) * od[1];
+    m.outElemsList[static_cast<size_t>(i)] = oelems;
+    m.outBufs[static_cast<size_t>(i)].resize(oelems);
+    const char* oname = spec->outs && spec->numOuts > 0 ? spec->outs[i].name : spec->outName;
+    float oscale = spec->outs && spec->numOuts > 0 ? spec->outs[i].scale : spec->outScale;
+    int32_t ooff = spec->outs && spec->numOuts > 0 ? spec->outs[i].offset : spec->outOffset;
+    uint32_t oid = spec->outs && spec->numOuts > 0 ? spec->outs[i].id : spec->outId;
+    m.outScales[static_cast<size_t>(i)] = oscale;
+    m.outOffsets[static_cast<size_t>(i)] = ooff;
+    m.outTensors[static_cast<size_t>(i)] =
+        makeTensor(oname, QNN_TENSOR_TYPE_APP_READ, od, 2, oscale, ooff,
+                   m.outBufs[static_cast<size_t>(i)].data(), oelems, oid);
+  }
+  for (size_t e : m.outElemsList) m.outElemsTotal += e;
 
-  logmsg("INFO", "loaded model '%s' (%s): graph '%s', in %s [%ux%ux%ux%u], out %s [%ux%u]",
+  char outLog[1024] = "";
+  size_t p = 0;
+  for (int i = 0; i < nOut; ++i) {
+    const char* oname = spec->outs ? spec->outs[i].name : spec->outName;
+    p += snprintf(outLog + p, sizeof(outLog) - p, "%s%s [%s]", i ? ", " : "", oname,
+                  i ? "" : "");
+  }
+  logmsg("INFO", "loaded model '%s' (%s): graph '%s', in %s [%ux%ux%ux%u], outs=%d total_elems=%zu",
          spec->key, path.c_str(), spec->graphName, spec->inName, m.inDims[0], m.inDims[1],
-         m.inDims[2], m.inDims[3], spec->outName, m.outDims[0], m.outDims[1]);
-  logmsg("DBG", "load %s: inDims=[%u,%u,%u,%u] outDims=[%u,%u] inElems=%zu outElems=%zu outBuf=%zu df=%u",
-         spec->key, m.inDims[0], m.inDims[1], m.inDims[2], m.inDims[3], m.outDims[0],
-         m.outDims[1], inElems, outElems, m.outBuf.size(), gTensorDataFormat);
+         m.inDims[2], m.inDims[3], nOut, m.outElemsTotal);
+  logmsg("DBG", "load %s: %s", spec->key, outLog);
   g_models.push_back(std::move(m));
   return true;
 }
@@ -215,10 +271,13 @@ static bool infer(Model& m, const uint8_t* inBuf, size_t inElems, float* outF32)
   // keep tensor data pointers fresh (buffers are ours for the process lifetime,
   // but re-assert for clarity/safety after any vector reallocation elsewhere)
   m.inTensor.v1.clientBuf.data = const_cast<uint8_t*>(inBuf);
-  m.outTensor.v1.clientBuf.data = m.outBuf.data();
+  for (size_t i = 0; i < m.outTensors.size(); ++i) {
+    m.outTensors[i].v1.clientBuf.data = m.outBufs[i].data();
+  }
   auto t0 = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(g_execMu);
-  Qnn_ErrorHandle_t err = QNNFN(graphExecute)(m.graph, &m.inTensor, 1, &m.outTensor, 1, nullptr,
+  Qnn_ErrorHandle_t err = QNNFN(graphExecute)(m.graph, &m.inTensor, 1, m.outTensors.data(),
+                                              static_cast<uint32_t>(m.outTensors.size()), nullptr,
                                               nullptr);
   auto t1 = std::chrono::steady_clock::now();
   m.lastMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -229,12 +288,15 @@ static bool infer(Model& m, const uint8_t* inBuf, size_t inElems, float* outF32)
     g_totalErrors++;
     return false;
   }
-  // uFxp_8 -> float32 :  x = (q + offset) * scale
-  const float os = m.spec->outScale;
-  const int32_t oo = m.spec->outOffset;
-  const size_t outElems = m.outBuf.size();
-  for (size_t i = 0; i < outElems; ++i) {
-    outF32[i] = (static_cast<float>(static_cast<int32_t>(m.outBuf[i])) + static_cast<float>(oo)) * os;
+  // uFxp_8 -> float32 per output :  x = (q + offset) * scale  (concatenated,
+  // in spec order — the client splits the response by the known element counts)
+  size_t dst = 0;
+  for (size_t i = 0; i < m.outBufs.size(); ++i) {
+    const float os = m.outScales[i];
+    const int32_t oo = m.outOffsets[i];
+    for (uint8_t q : m.outBufs[i]) {
+      outF32[dst++] = (static_cast<float>(static_cast<int32_t>(q)) + static_cast<float>(oo)) * os;
+    }
   }
   return true;
 }
@@ -274,7 +336,7 @@ static std::string healthJson() {
          ",\"last_ms\":" + std::to_string(m.lastMs) + "}";
   }
   s += "],\"total_runs\":" + std::to_string(g_totalRuns) + ",\"total_errors\":" +
-       std::to_string(g_totalErrors) + ",\"version\":\"1.0.0\"}";
+       std::to_string(g_totalErrors) + ",\"version\":\"1.1.0\"}";
   return s;
 }
 
@@ -374,7 +436,7 @@ static void handleConnection(int fd) {
            buf.size(), headerEnd, bodyReads, bodyBytes, (unsigned long long)h);
   }
 
-  std::vector<float> outF32(m->outBuf.size());
+  std::vector<float> outF32(m->outElemsTotal);
   std::vector<uint8_t> int8In;
   if (preQuant) {
     int8In.assign(body.begin(), body.end());
@@ -387,7 +449,7 @@ static void handleConnection(int fd) {
     sendReply(fd, 500, "Internal Server Error", "inference failed");
     return;
   }
-  logmsg("DBG", "%s: outBuf=%zu outF32=%zu", key.c_str(), m->outBuf.size(), outF32.size());
+  logmsg("DBG", "%s: outF32=%zu", key.c_str(), outF32.size());
   sendReply(fd, 200, "OK", std::string(reinterpret_cast<const char*>(outF32.data()),
                                        outF32.size() * sizeof(float)));
 }
@@ -417,7 +479,9 @@ static void usage(const char* p) {
           "  --clip-context PATH      CLIP ViT-B/32 context binary\n"
           "  --clip-graph NAME        graph name (default clipr37)\n"
           "  --arcface-context PATH   ArcFace w600k_r50 context binary\n"
-          "  --arcface-graph NAME     graph name (default arcface37)\n",
+          "  --arcface-graph NAME     graph name (default arcface37)\n"
+          "  --scrfd-context PATH     SCRFD-2.5G face-detector context binary (9 outputs)\n"
+          "  --scrfd-graph NAME       graph name (default scrfd)\n",
           p);
 }
 
@@ -427,6 +491,7 @@ int main(int argc, char** argv) {
   int port = 8089;
   std::string clipCtx, clipGraph = "clipr37";
   std::string arcCtx, arcGraph = "arcface37";
+  std::string scrCtx, scrGraph = "scrfd";
   double clipInScale = -1, clipInOff = -1, clipOutScale = -1, clipOutOff = -1;
   double arcInScale = -1, arcInOff = -1, arcOutScale = -1, arcOutOff = -1;
   uint32_t dataFormat = 1032;
@@ -451,6 +516,8 @@ int main(int argc, char** argv) {
     else if (const char* v = next("--arcface-in-offset")) arcInOff = std::atof(v);
     else if (const char* v = next("--arcface-out-scale")) arcOutScale = std::atof(v);
     else if (const char* v = next("--arcface-out-offset")) arcOutOff = std::atof(v);
+    else if (const char* v = next("--scrfd-context")) scrCtx = v;
+    else if (const char* v = next("--scrfd-graph")) scrGraph = v;
     else if (const char* v = next("--data-format")) dataFormat = static_cast<uint32_t>(std::strtoul(v, nullptr, 0));
     else if (std::string(argv[i]) == "--no-device") gNoDevice = true;
     else {
@@ -518,6 +585,23 @@ int main(int argc, char** argv) {
   ModelSpec arcSpec{"arcface", arcGraph.c_str(), "input_1", "_683",
                     {1, 3, 112, 112}, {1, 512}, 0.006889658049f, -136, 0.015603637323f, -123,
                     1, 475};
+  // SCRFD-2.5G (buffalo_l detection): 9 outputs in ONNX graph-output order
+  // (score/box/kps per FPN level, 2 anchors x 80^2/40^2/20^2). Tensor names,
+  // ids, dims, scales, offsets from scrfd_6490_v2.bin metadata
+  // (tools/qnn_sys_introspector, QAIRT 2.37.1, uFxp_8, dataFormat 1032).
+  static const OutSpec scrfdOuts[] = {
+      {"_448", {12800, 1, 1, 1}, 0.0031538952607661486f, 0, 347},
+      {"_471", {3200, 1, 1, 1}, 0.0032401620410382748f, 0, 396},
+      {"_494", {800, 1, 1, 1}, 0.00014671012468170375f, 0, 445},
+      {"_451", {12800, 4, 1, 1}, 0.018793873488903046f, 0, 350},
+      {"_474", {3200, 4, 1, 1}, 0.022282257676124573f, 0, 399},
+      {"_497", {800, 4, 1, 1}, 0.017743172124028206f, 0, 448},
+      {"_454", {12800, 10, 1, 1}, 0.024366198107600212f, -121, 353},
+      {"_477", {3200, 10, 1, 1}, 0.030040601268410683f, -126, 402},
+      {"_500", {800, 10, 1, 1}, 0.012706567533314228f, -95, 451},
+  };
+  ModelSpec scrSpec{"scrfd", scrGraph.c_str(), "input_1", "", {1, 3, 640, 640}, {1, 1},
+                    0.0078125f, -128, 0.0f, 0, 1, 0, scrfdOuts, 9};
   if (clipInScale > 0) clipSpec.inScale = static_cast<float>(clipInScale);
   if (clipInOff > -0.5) clipSpec.inOffset = static_cast<int32_t>(clipInOff);
   if (clipOutScale > 0) clipSpec.outScale = static_cast<float>(clipOutScale);
@@ -528,8 +612,13 @@ int main(int argc, char** argv) {
   if (arcOutOff > -0.5) arcSpec.outOffset = static_cast<int32_t>(arcOutOff);
   gTensorDataFormat = dataFormat;
 
+  // Load order = VTCM priority: CLIP + ArcFace (existing production models)
+  // first, SCRFD last — if the Hexagon VTCM cannot host all three contexts,
+  // the newest one (detection) fails to load and degrades to CPU via the
+  // QnnSession fallback while the other two keep serving.
   if (!clipCtx.empty()) loadModel(&clipSpec, clipCtx);
   if (!arcCtx.empty()) loadModel(&arcSpec, arcCtx);
+  if (!scrCtx.empty()) loadModel(&scrSpec, scrCtx);
   if (g_models.size() == 0) {
     logmsg("ERR", "no models loaded — exiting");
     return 1;

@@ -1,6 +1,7 @@
 # immich-ml-qnn — Immich ML on the Qualcomm QCS6490 NPU
 
 Runs Immich's machine-learning models (CLIP ViT-B/32 image embeddings + ArcFace
+face recognition + SCRFD face detection — the full facial-recognition pipeline)
 w600k_r50 face recognition) on the Radxa Dragon Q6A's Hexagon NPU (HTP), while
 everything else (text encoder, SCRFD face detection, OCR) stays on the CPU
 (ONNX Runtime) — the same split as stock Immich, with the two heaviest
@@ -40,7 +41,10 @@ immich-ml  (patched, this image)
   including insightface's `ArcFaceONNX` wrapper — works unchanged.
 - **Routing** (`immich_ml/models/base.py`): `_make_session()` returns a
   `QnnSession` **only** when the env var `IMMICH_ML_QNN_URL` is set **and**
-  the model key is one of `clip` / `arcface`. With the env var unset the image
+  the model key is one of `clip` / `arcface` / `scrfd`. If the daemon reports a
+  model unavailable (or is unreachable / errors), that model transparently falls
+  back to CPU ONNX Runtime for the lifetime of the process (logged once). With
+  the env var unset the image
   behaves exactly like stock immich-ml (all models on ORT/CPU) — the fork is
   inert by default.
 
@@ -65,7 +69,8 @@ generated / gitignored image inputs (not shipped by this public repo):
 build-headers/QNN/          QAIRT headers for the bookworm daemon build
 daemon/qnn_dsp_daemon_bookworm  aarch64 binary built against Debian 12 glibc
 daemon/runtime/             Qualcomm HTP runtime (3 files)
-daemon/models/              generated INT8 contexts (clipr37_6490.bin, arcface37v6_6490.bin)
+daemon/models/              generated INT8 contexts (clipr37_6490.bin, arcface37v6_6490.bin,
+                               scrfd_6490_v2.bin)
 ```
 
 ## Build (on the board)
@@ -113,7 +118,8 @@ docker run -d --name immich-ml \
 - **Without** `IMMICH_ML_QNN_URL` the daemon is not started and every model
   runs on the CPU (stock behaviour).
 - **With** it, the daemon starts, loads both context binaries (~1-2 s), and
-  the CLIP-visual and ArcFace-recognition models route to the NPU.
+  the CLIP-visual, ArcFace-recognition and SCRFD-detection models route to
+  the NPU (3 contexts coexist in HTP VTCM).
 
 ## Verification (done on the board)
 

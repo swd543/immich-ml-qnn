@@ -40,6 +40,7 @@ static void printTensor(const char* kind, const Qnn_Tensor_t* t) {
   Qnn_TensorType_t type = QNN_TENSOR_TYPE_UNDEFINED;
   Qnn_TensorMemType_t memType = QNN_TENSORMEMTYPE_UNDEFINED;
   Qnn_QuantizeParams_t qp{};
+  uint32_t id = 0;
   if (version == QNN_TENSOR_VERSION_1) {
     name = t->v1.name;
     rank = t->v1.rank;
@@ -48,10 +49,12 @@ static void printTensor(const char* kind, const Qnn_Tensor_t* t) {
     type = t->v1.type;
     memType = t->v1.memType;
     qp = t->v1.quantizeParams;
+    id = t->v1.id;
   } else {
     name = t->v2.name;
     rank = t->v2.rank;
     dims = t->v2.dimensions;
+    id = t->v2.id;
     dt = t->v2.dataType;
     type = t->v2.type;
     memType = t->v2.memType;
@@ -63,8 +66,8 @@ static void printTensor(const char* kind, const Qnn_Tensor_t* t) {
   for (uint32_t i = 0; i < rank; ++i) {
     p += snprintf(p, 256 - (p - dimsBuf), "%s%u", i ? "x" : "", dims ? dims[i] : 0);
   }
-  printf("    %-10s %-16s %-8s type=%d dataFormat=%u rank=%u dims=[%s] memType=%u version=%u\n",
-         kind, name ? name : "?", dataTypeName(dt), (int)type, (unsigned)dt, (unsigned)rank,
+  printf("    %-10s %-16s %-8s id=%u type=%d dataFormat=%u rank=%u dims=[%s] memType=%u version=%u\n",
+         kind, name ? name : "?", dataTypeName(dt), (unsigned)id, (int)type, (unsigned)dt, (unsigned)rank,
          dimsBuf, (unsigned)memType, (unsigned)version);
   if (qp.quantizationEncoding == QNN_QUANTIZATION_ENCODING_SCALE_OFFSET) {
     printf("             quantize: encodingDef=%u enc=%u scale=%.17g offset=%d\n",
@@ -131,7 +134,7 @@ int main(int argc, char** argv) {
   }
 
   printf("context: %s\n", argv[2]);
-  if (bi->version == QNN_SYSTEM_CONTEXT_BINARY_INFO_V3) {
+  if (bi->version == QNN_SYSTEM_CONTEXT_BINARY_INFO_VERSION_3) {
     auto* v3 = &bi->contextBinaryInfoV3;
     printf("  backendId=%u buildId=%s socVersion=%s blobSize=%lu socModel=%u\n", v3->backendId,
            v3->buildId ? v3->buildId : "?", v3->socVersion ? v3->socVersion : "?",

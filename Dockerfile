@@ -6,7 +6,7 @@
 #   * qnn-dsp-daemon (QNN C API inference server, aarch64, built against
 #     bookworm glibc 2.36 so it runs in this image)
 #   * Qualcomm HTP runtime (libQnnHtp.so + skel + stub, QAIRT 2.37 generation)
-#   * INT8 context binaries (CLIP ViT-B/32 + ArcFace w600k_r50)
+#   * INT8 context binaries (CLIP ViT-B/32 + ArcFace w600k_r50 + SCRFD-2.5G detection)
 #
 # Build (on the board):
 #   docker build -t immich-ml-qnn:local .

@@ -10,6 +10,7 @@ required=(
   daemon/runtime/libQnnHtpV68Skel.so
   daemon/models/clipr37_6490.bin
   daemon/models/arcface37v6_6490.bin
+  daemon/models/scrfd_6490_v2.bin
 )
 missing=0
 for path in "${required[@]}"; do

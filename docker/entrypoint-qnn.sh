@@ -19,7 +19,8 @@ if [ -n "${IMMICH_ML_QNN_URL:-}" ]; then
     --port "$QNN_PORT" \
     --bind 127.0.0.1 \
     --clip-context /opt/qnn/models/clipr37_6490.bin \
-    --arcface-context /opt/qnn/models/arcface37v6_6490.bin &
+    --arcface-context /opt/qnn/models/arcface37v6_6490.bin \
+    --scrfd-context /opt/qnn/models/scrfd_6490_v2.bin &
   DAEMON_PID=$!
   trap 'kill "$DAEMON_PID" 2>/dev/null || true' TERM INT
 

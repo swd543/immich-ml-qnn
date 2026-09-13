@@ -1,10 +1,14 @@
-# STATE (session continuity) — 2026-09-05
+# STATE (session continuity) — 2026-09-13
 
 ## DONE: Immich ML NPU integration (production)
 
 The production `immich-ml` container on the Radxa Q6A now runs
 `immich-ml-qnn:local`: CLIP ViT-B/32 visual + ArcFace w600k_r50 recognition
-on the QCS6490 NPU (HTP INT8, via qnn-dsp-daemon), everything else on CPU ORT.
++ **SCRFD face detection** on the QCS6490 NPU (HTP INT8, via qnn-dsp-daemon),
+everything else on CPU ORT. 2026-09-13: the full ML pipeline (detection +
+recognition + CLIP) is NPU-accelerated; verified live via `/predict`
+(bounding boxes + embeddings whose values are exact multiples of the NPU
+dequant scales).
 Verified live: `/predict` returns CLIP embeddings + face detection/recognition;
 immich server reports the ML service healthy; all 6 containers healthy.
 
@@ -181,3 +185,60 @@ Board-side load-test gotchas (reusable):
 - Probe workspace: board `/home/buga/immich-ml-qnn/probe-asr-tts/` (22 MB),
   host `~/qairt/work/probes/`.
 - CDSP stayed attached; production immich-ml daemon untouched throughout.
+
+## 2026-09-13: SCRFD NPU deployment (COMPLETE, production)
+
+The VTCM root-cause fix (above) led to the full SCRFD-on-NPU rollout:
+
+1. **Context**: `scrfd_6490_v2.bin` (5.25 MB, `vtcm_size=2097152`, graph name
+   `scrfd`, INT8 per-channel, calibrated on 10 real photos 640x640). The
+   quantized DLC's **embedded graph name** (search the context binary for the
+   string; `qairt.load(...).name` returns the FILE name, not the graph name)
+   must exactly match `HtpGraphConfig(name=...)` or the VTCM pin silently
+   drops to 4 MB.
+2. **Quality gate**: x86 HTP sim vs CPU float32 ORT, 4 real photos / 6 faces:
+   all faces found by both, **IoU 0.984-0.996**, scores within 0.09.
+3. **Board E2E (real 960x720 photo, 6 faces)**: NPU IoU min 0.9721 vs CPU,
+   score diffs <= 0.022, NPU steady ~62-84 ms vs CPU 2.6 s (~42x).
+4. **3-model concurrency**: clip + arcface + scrfd contexts coexist in VTCM
+   (1 MB + 0.95 MB + 0.95 MB); the daemon loads them in that order (newest
+   last = degrades first if VTCM were ever exhausted).
+5. **Graceful degradation (contract the user approved)**: `QnnSession`
+   (`immich_ml/sessions/qnn.py`) falls back to a lazily-built CPU
+   onnxruntime session if the daemon is unreachable / errors / reports the
+   model unavailable (per-process, logged once). Detection degrades first
+   (loaded last). Fallback verified: results match the CPU baseline.
+6. **Daemon v1.1.0** (`daemon/qnn_dsp_daemon.cpp`): multi-output support
+   (single-output models are the 1-element case; response = concatenated
+   float32 in ONNX graph order), `--scrfd-context`/`--scrfd-graph` flags.
+7. **Deployment**: image `immich-ml-qnn:local` (rollback:
+   `immich-ml-qnn:rollback-20260913`), container recreated with the same
+   `docker run` args; `/health` reports all 3 models; all 7 containers
+   healthy.
+
+### Bugs found and fixed in this rollout (lessons)
+- **Dangling `dimensions` pointer**: `makeTensor` must take
+  `(const uint32_t* dims, uint32_t rank)` — the backend dereferences the
+  dims during `graphExecute`, so the storage must outlive the call (stable
+  per-model vectors; `reserve()` before push_back). A loop-local
+  `std::vector` produced `0x1774` (5007 GRAPH_EXECUTION_FAILED).
+- **Unpopulated dequant tables**: refactoring the load loop dropped the
+  `outScales[i]`/`outOffsets[i]` assignments; dequant then ran on
+  zero-initialized vectors -> all-zero outputs despite valid int8 data in
+  `outBufs`. Instrument with raw-NZ + checksum probes (`--selftest`
+  pattern), never ship it.
+- **QnnSession batch bug (pre-existing, latent)**: the static-batch=1 shape
+  check `arr.shape[:1] != self._in_shape[:1]` raised on **batched face
+  recognition** ([N,3,112,112]) BEFORE the per-item loop. Multi-face assets
+  would have failed. Now validates the CHW dims after the batch axis and
+  loops the batch.
+- **QNN output tensor IDs** are needed for `graphExecute` (not derivable
+  from names); `tools/qnn_sys_introspector.cpp` prints them (also fixed its
+  constant name `QNN_SYSTEM_CONTEXT_BINARY_INFO_V3` ->
+  `QNN_SYSTEM_CONTEXT_BINARY_INFO_VERSION_3` vs the genuine SDK headers).
+- **Board E2E gotchas**: `/predict` multipart needs the `entries` form field
+  (JSON pipeline spec, see e2e scripts); the response is nested per task
+  (facial-recognition is a LIST of per-face entries); the production
+  `docker run` mounts `/cache` **rw** (not ro); scratch daemons must be
+  bound to 127.0.0.1 so `curl 127.0.0.1:port` inside the container does not
+  traverse the docker bridge and hit the host.

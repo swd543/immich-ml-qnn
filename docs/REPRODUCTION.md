@@ -299,7 +299,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY immich_ml /usr/src/immich_ml          # patched package (base.py + sessions/qnn.py)
 COPY daemon/qnn_dsp_daemon_bookworm /opt/qnn/qnn_dsp_daemon
 COPY daemon/runtime/ /opt/qnn/runtime/     # Radxa v2.37.1 HTP runtime (libQnnHtp.so, skels, stub)
-COPY daemon/models/ /opt/qnn/models/       # clipr37_6490.bin + arcface37v6_6490.bin
+COPY daemon/models/ /opt/qnn/models/       # clipr37_6490.bin + arcface37v6_6490.bin + scrfd_6490_v2.bin
 COPY docker/entrypoint-qnn.sh /entrypoint-qnn.sh
 ENV IMMICH_ML_QNN_PORT=8089
 ENTRYPOINT ["tini", "--", "/entrypoint-qnn.sh"]
@@ -350,14 +350,18 @@ Only two files differ from stock `immich-ml` v3.1.0
 (`upstream-diff.patch` in the repo root):
 
 - `immich_ml/models/base.py` — `_make_session()` returns a `QnnSession` for
-  model keys `clip`/`arcface` **only when `IMMICH_ML_QNN_URL` is set**
+  model keys `clip`/`arcface`/`scrfd` **only when `IMMICH_ML_QNN_URL` is set**
   (read via `os.environ`, not pydantic, so unset = bit-identical stock
   behaviour);
 - `immich_ml/sessions/qnn.py` (new) — duck-types `ort.Session`
   (`get_inputs()` / `get_outputs()` / `run()`), so Immich's model code —
   including insightface's `ArcFaceONNX` wrapper — works **unmodified**.
 
-Routing keys: `clip` = CLIP visual encoder, `arcface` = face recognition.
+Routing keys: `clip` = CLIP visual encoder, `arcface` = face recognition,
+`scrfd` = face detection (9 outputs; response is one concatenated float32
+buffer in ONNX graph order, split by the client via per-output element
+counts). A model that the daemon reports unavailable falls back to CPU
+ONNX Runtime for the process lifetime (logged once).
 SCRFD detection and everything else stay on the ONNX Runtime path.
 
 ---
@@ -399,7 +403,7 @@ Required mounts/devices, and why:
 | `/proc/device-tree` (ro) | HTP backend reads SoC topology (HMX count, VTCM) |
 | `/usr/lib/dsp` (ro) | fastrpc daemon dirs (adsp/cdsp) |
 | `libcdsprpc.so{,.1}` (ro) | userspace fastrpc client lib |
-| `…/media/cache` → `/cache` (ro) | Immich model cache (CLIP/ArcFace ONNX for the CPU models + config) |
+| `…/media/cache` → `/cache` (rw) | Immich model cache (CLIP/ArcFace/SCRFD ONNX for the CPU fallback + config) |
 
 ### 8.2 Compose / env wiring (ffclone repo, `qnn` branch)
 
