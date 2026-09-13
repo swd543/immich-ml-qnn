@@ -43,7 +43,47 @@ immich server reports the ML service healthy; all 6 containers healthy.
 - Note: axiom `/tmp/qairt-work/` (SDKs/venv/DLCs/headers) is volatile;
   board `/tmp/` artifacts are persisted under /home/buga/immich-ml-qnn/artifacts/.
 
-## SCRFD → NPU: BLOCKED (2026-09-05, root cause proven)
+## SCRFD → NPU: SUPERSEDED 2026-09-13 — "BLOCKED" was a VTCM misconfiguration, not the firmware
+
+**Correction (2026-09-13).** The 2026-09-05 conclusion below is invalid. Re-running the
+probes with a correctly pinned VTCM (graph name matched to `HtpGraphConfig`) showed the
+real failure mode: the firmware rejects contexts requesting **4 MB VTCM**
+(`Request feature vtcm size with value 4194304 unsupported` → surfaced as `0x138d`).
+Every Sept-5 SCRFD/min-Resize context binary was built at 4 MB (the HtpGraphConfig name
+didn't match the graph, so `vtcm_size_in_mb=2` was silently dropped and the compiler
+defaulted to 4 MB); the only control that registered (CLIP) was built at 2 MB. Verified
+by string inspection: `ctx_nine/ctx_one/ctxA_oneout/scrfd320/scrfd_dbg/scrfd_6490.bin`
+all carry `vtcm_size=4194304`; `ctx_control_clip.bin` carries `2097152`.
+
+**2026-09-13 re-test results (QAIRT 2.37.1, correct vtcm pin, board scratch daemon, port
+8092, wedge-safety timeouts, board alive after every run):**
+- Minimal single-op int8 `Resize` context (2 MB): **registers + loads** ✓
+- Minimal single-op int8 `Gather` (static int64 indices) context (2 MB): **registers + loads** ✓
+- **Full SCRFD 640×640, 9 outputs, INT8 per-channel** (10 real-photo calib, vtcm 2 MB,
+  5.25 MB context `scrfd_6490_v2.bin`): **registers + loads** ✓
+- Quality (x86 HTP sim of the exact context vs CPU float32 ORT, same preprocessed tensor,
+  insightface decode, 4 real photos / 6 faces): IoU 0.984–0.996, score deltas ≤ 0.09,
+  all faces found by both. Raw score tensors: maxdiff ≤ 0.043 on 0..1.
+
+**Consequence: SCRFD face detection CAN run on the QCS6490 NPU.** CPU cost was 710
+ms/frame; expected NPU cost ~15–25 ms (model is lighter than the 8.9 ms ArcFace R50).
+Artifacts: dev host `/home/buga/qairt/work/scrfd/` (scrfd_q.dlc, scrfd_6490_v2.bin,
+10 calib raws, out_scrfd_v2/ + out3/ sim ground truths, final_compare.py), board
+`/home/buga/immich-ml-qnn/work/gather-probe/` (probe contexts + scrfd_6490_v2.bin).
+
+Remaining (production integration, pending go-ahead):
+1. daemon: 3rd model route `scrfd` (--scrfd-context/--scrfd-graph, input `input.1`
+   [1,3,640,640] + 9 outputs; tensor ids/scales/offsets from context metadata).
+2. `QnnSession` routing key `detection` in `immich_ml/models/base.py` — must return 2D
+   [K,1]/[K,4]/[K,10] outputs (batch folded, as ORT does) for insightface RetinaFace.
+3. VTCM budget: 3 graphs × 2 MB = 6 MB of 8 MB — verify under production load.
+4. Rebuild daemon (bookworm) + image + asset staging; verify per §9 (md5 = net-run,
+   /predict e2e, cosine gates); keep rollback backup.
+5. Lesson: ALWAYS check the context binary's embedded `vtcm_size=` (string search) after
+   compiling — a silent HtpGraphConfig name mismatch is invisible in the compile log.
+
+---
+Original 2026-09-05 record (superseded; kept for the evidence chain):
 
 Attempted to port the buffalo_l SCRFD face detector (last heavy CPU model) to the NPU.
 **Result: not possible on this board's firmware. Root cause proven with full evidence chain.**
@@ -84,7 +124,7 @@ maxdiff 1.51 vs ORT for the ConvTranspose attempt). SCRFD's multi-scale anchor b
   58 Conv + 2 Resize + 3 Sigmoid + 9 Transpose/Reshape + 3 AvgPool + 1 MaxPool;
   anchor priors are content-derived (lateral convs), NOT constants.
 
-### Decisions
+### Decisions (as of 2026-09-05 — superseded 2026-09-13, see correction above)
 - Keep SCRFD on CPU (status quo). Production NPU path (CLIP + ArcFace) unaffected.
 - Alternatives (not pursued): Resize-free detector (e.g. YOLOv8-Face family — needs custom
   bridge + accuracy validation); wait for Radxa to ship a newer QAIRT runtime with
