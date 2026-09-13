@@ -264,3 +264,44 @@ The VTCM root-cause fix (above) led to the full SCRFD-on-NPU rollout:
   * event waiting jobId <id>`. Failed-and-discarded jobs are NOT recoverable
   from redis; re-enqueueing QueueAll covers them (server skips already-
   processed assets).
+
+## 2026-09-13 — CDSP wedge, container swap trap, queue-run endpoint
+
+### CDSP wedge: only a true power cycle clears it
+- Symptoms: `deviceCreate failed 0x36b1` (=14001 "platform info"), `qnn_open failed
+  0x72`, `createUnsignedPD ... not supported by HTP`, skel load 1002 — all three
+  contexts fail in the daemon; the same binary run standalone on the host fails the
+  same way.
+- Kernel-level `FASTRPC_IOCTL_GET_DSP_INFO` on `/dev/fastrpc-{cdsp,adsp}` still
+  succeeds (host<->DSP glink link OK) — the failure is DSP-side state.
+- `sudo reboot` (kernel reboot) does NOT clear it: the CDSP state/SMP2P shared
+  memory survives because PMIC rails stay powered. **Unplugging power for ~60 s
+  clears it.** (Observed 2026-09-13: power cycle -> standalone daemon probe loads
+  clip context, `device=0x1`.)
+- Suspected original trigger: abrupt daemon death (SIGTERM without a clean
+  fastrpc close) during the 17:2x container swap — the daemon has no SIGTERM
+  handler. Candidate hardening: add a graceful fastrpc shutdown on signal.
+
+### Production container swap: `--device /dev/fastrpc-cdsp` is MANDATORY
+- The working 14 h container had `HostConfig.Devices: [/dev/fastrpc-cdsp]` (see
+  swap-backup/immich-ml-inspect-20260913.json). A swap without it makes the
+  in-container daemon fail with the exact same 0x36b1 errors as a wedged DSP —
+  do not confuse the two. Full working `docker run` = network immich_default +
+  --device /dev/fastrpc-cdsp + the 5 binds + IMMICH_ML_DEVICE=cpu +
+  IMMICH_ML_QNN_URL=http://127.0.0.1:8089, image `immich-ml-qnn:local`.
+
+### Re-enqueueing queues on v3.2.0 (BullMQ 5.81.3): use the server API
+- Raw Redis recipe (HSET job hash + LPUSH :wait + XADD :events) gets consumed but
+  dispatches as `Skipping unknown job: "undefined"` on this stack — do not use.
+- Official path: `PUT /api/jobs/faceDetection` with body
+  `{"command":"start","force":false}` and the x-api-key (jobRepository.queue does
+  the BullMQ producer correctly). Queues: faceDetection, facialRecognition,
+  smartSearch, ocr, thumbnailGeneration. Verified 2026-09-13: 60 assets ->
+  61 faces, 6 persons, 0 queue failures, NPU 137 runs 0 errors.
+
+### qnn.py multi-face batch fix (c84b810, deployed)
+- `np.stack` on per-item outputs (which already carry the static batch axis,
+  (1,512)) produced (N,1,512) -> per-face embeddings serialized as [[...]] ->
+  pgvector `invalid input syntax for type vector`. Fixed to `np.concatenate`
+  along axis 0 (= ORT semantics). Verified in production: 13-face photo ->
+  13 x flat-512 embeddings via the NPU.
