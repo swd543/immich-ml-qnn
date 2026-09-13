@@ -198,11 +198,14 @@ class QnnSession:
         # (a single-output model returns a 1-element list). run() returns
         # that list directly — OrtSession-compatible for multi-output graphs.
         if arr.shape[0] > 1:
-            # Batched input (face recognition): the QNN graph is static
-            # batch=1, so run per item and re-stack along the batch axis.
+            # Batched input (multi-face recognition): the QNN graph is
+            # static batch=1, so run per item and concatenate along the
+            # batch axis. Each per-item output already carries the batch
+            # axis ((1, ...) from _out_shapes); np.stack would add a
+            # second one ((N, 1, ...)) and corrupt the embedding shape.
             outs = [self._infer_one(arr[i]) for i in range(arr.shape[0])]
             return [
-                np.stack([o[j] for o in outs], axis=0)
+                np.concatenate([o[j] for o in outs], axis=0)
                 for j in range(len(self._out_shapes))
             ]
         return self._infer_one(arr[0])
