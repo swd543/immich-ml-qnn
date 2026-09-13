@@ -341,3 +341,37 @@ The VTCM root-cause fix (above) led to the full SCRFD-on-NPU rollout:
 - `PUT /api/jobs/<faceDetection|facialRecognition|smartSearch|ocr|thumbnailGeneration>`
   body `{"command":"start","force":false}` with x-api-key. Facial-recognition
   `force:true` unassigns + re-clusters (use only after deliberate changes).
+
+## 2026-09-13 hardening (commit a3155b3) — lifecycle, fallback, tests, provenance
+
+- **New image** `immich-ml-qnn:local` = `sha256:b7a4c67e57e2…` (OCI label
+  `org.opencontainers.image.revision = a3155b3…`; build with
+  `--build-arg QNN_COMMIT=<rev>`). Rollback tags: `rollback-a3155b3` (= prior
+  `sha256:6133792772…`), `rollback-20260913`.
+- **Container**: `--restart unless-stopped` (was `no` — ML did not survive a
+  board reboot), compose labels `com.docker.compose.project=immich` /
+  `com.docker.compose.service=immich-ml` so the compose stack owns it.
+- **CDSP-wedge fix**: the abrupt-daemon-death path is gone. Verified
+  `docker stop` teardown logs: `contextFree(scrfd)=0x0 contextFree(arcface)=0x0
+  contextFree(clip)=0x0 deviceFree=0x0 backendFree=0x0`, board healthy
+  after, all 3 contexts reloaded cleanly on `docker start`, 13-face /predict
+  still OK. The entrypoint no longer `exec`s python, so SIGTERM reaches the
+  daemon (stopped + waited on before exit). SIGKILL still can't be trapped —
+  avoid `docker kill` while the daemon holds contexts.
+- **Daemon hardening**: SIGPIPE ignored; context freed on `graphRetrieve`
+  failure; fail-closed on invalid `--bind`; SCRFD-only startup allowed;
+  numeric overrides use NAN sentinels (negative offsets like -116 accepted).
+- **qnn.py fallback broadened**: HTTP error, timeout, connection error OR
+  malformed/truncated response (bad length / not multiple of 4 / wrong element
+  count) all degrade to CPU (per-session, sticky). CPU fallback session uses
+  an explicit CPUExecutionProvider.
+- **Regression tests** `tests/test_qnn_session.py` (stdlib unittest, 8 tests;
+  `python3 -m unittest discover -s tests`). Covers the (N,512)
+  batch-concatenate regression, SCRFD 9-output split, fallback stickiness, and
+  routing. The two CPU-fallback tests need onnxruntime + a model file (present
+  in the container; skipped elsewhere). Verified 8/8 OK in-container.
+- **Post-swap verification recipe** (always): (1) "listening; models: 3" in
+  logs; (2) `GET /health` in-container; (3) `http://immich-ml:3003/ping` FROM
+  the immich container (cross-container!); (4) one multi-face /predict; (5)
+  `docker stop` → five clean frees in logs → board ssh OK → `docker start` →
+  models: 3 → repeat (4).

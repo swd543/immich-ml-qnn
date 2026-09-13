@@ -34,7 +34,7 @@ build host (x86_64)                          board (aarch64, Q6A)
 | HMX | 4 units, 8 MB VTCM total | `vtcm_mb: 2` per graph works (2 graphs resident) |
 | NPU precision | **INT8 only** | per-channel INT8 quantization required |
 | Firmware QNN interface cap | **2.32.0** | must use QAIRT **2.37.1** context binaries (matches the on-board v2.37.1 runtime); newer SDKs (2.42) generate contexts the firmware rejects |
-| `Resize` op | **not registerable** | contexts referencing the Resize op-package fail with `0x138d` (OP_PACKAGE_NOT_FOUND) — see §9. This blocks SCRFD on the NPU. |
+| `Resize` op | **registerable at 2 MB VTCM** | minimal single-op int8 Resize contexts register + load (2026-09-13 re-test). The Sept-5 "0x138d on any Resize" results were actually **4 MB VTCM** contexts (silent `HtpGraphConfig` name mismatch → compiler default 4 MB), which the firmware rejects. Always string-search a context for its embedded `vtcm_size=` after compiling. |
 
 All commands in this guide use QAIRT **2.37.1.250807** and produce binaries
 bit-compatible with the on-board Radxa runtime.
@@ -102,8 +102,9 @@ for comparison, not required for the build.
   `input_1` [1,3,112,112] float32. Output `_683` [1,512].
 - **Why B/32, not B/16**: A/B tested on this NPU — ViT-B/16 is more sensitive
   to INT8 quantization AND slower; B/32 wins on both axes.
-- The text encoder, SCRFD detector and OCR models stay on CPU (ORT) — they are
-  never converted.
+- The CLIP text encoder and OCR models stay on CPU (ORT) — they are never
+  converted. SCRFD face detection **is** converted and runs on the NPU (third
+  context, 9 outputs, 2 MB VTCM — see §5 and §12).
 
 ### 3.1 CLIP ONNX patch (required)
 
@@ -310,7 +311,7 @@ ENTRYPOINT ["tini", "--", "/entrypoint-qnn.sh"]
 The public repository **does not ship** Qualcomm SDK/runtime files or generated
 context binaries. This avoids redistributing proprietary SDK artifacts and
 keeps ~134 MB of regenerable binaries out of git. Before building, stage the
-three runtime files, QNN headers, and the two contexts generated in §5:
+three runtime files, QNN headers, and the three contexts generated in §5:
 
 ```sh
 # On the BUILD HOST (where the x86 QAIRT SDK and contexts from §5 exist):
@@ -459,9 +460,10 @@ Run after any change (binaries, daemon, image, deployment):
    512-d ArcFace embedding, with the daemon log showing the `/infer` calls.
 4. **Production** — all 6 Immich containers healthy; `cat
    /sys/class/remoteproc/remoteproc1/state` = `attached`; daemon log shows
-   `listening; models: 2`.
+   `listening; models: 3`.
 5. **Performance reference** (production, 951×1385 photo, 30 sequential
-   `/predict`): ~1.8 req/s, ~543 ms/req end-to-end (PIL decode + SCRFD on
+   `/predict` — measured while SCRFD was still on CPU; rerun after any
+   routing change): ~1.8 req/s, ~543 ms/req end-to-end (PIL decode + SCRFD on
    CPU dominate); NPU share ≈ 17 ms (CLIP ~10.8 ms + ArcFace ~6.7 ms);
    daemon ≈ 0% CPU.
 
@@ -487,16 +489,6 @@ Run after any change (binaries, daemon, image, deployment):
 
 ## 11. What does NOT work here (with evidence)
 
-- **SCRFD face detector on the NPU — blocked by firmware.** SCRFD's
-  multi-scale anchor blending requires `Resize` (nearest 2× of content-derived
-  56-ch prior maps). The QCS6490 firmware (v2.37.1 runtime, QNN interface cap
-  2.32) does not provide the op package the compiler needs; `0x138d`
-  (OP_PACKAGE_NOT_FOUND) is returned for *any* context containing a Resize —
-  including a minimal single-op int8 Resize model. Nearest-2× upsample is
-  non-local and cannot be expressed with Conv/ConvTranspose (ConvTranspose
-  attempt measured maxdiff 1.51 vs ORT). Full bisection evidence and the
-  toolchain findings are in `STATE.md` ("SCRFD → NPU: BLOCKED").
-  Consequence: SCRFD stays on CPU (ORT).
 - **QAIRT 2.42** context binaries — the firmware's QNN interface cap (2.32)
   predates them; stick to 2.37.1.
 - **FLOAT contexts** — HTP on this SoC is INT8-only.
@@ -513,7 +505,7 @@ build-headers/, daemon/qnn_dsp_daemon_bookworm,
 daemon/runtime/, daemon/models/          generated/proprietary image inputs; gitignored,
                                         staged by tools/stage_image_assets.sh
 immich_ml/                              full package (only base.py + sessions/qnn.py differ)
-upstream-diff.patch                     the 201-line stock diff (mergeable)
+upstream-diff.patch                     the stock diff (models/base.py + new sessions/qnn.py; regenerate from source when qnn.py changes)
 tools/patch_clip_conv1.py               CLIP conv1 → Gemm patch
 tools/compile_htp.py                    DLC → SoC-pinned HTP context binary
 tools/stage_image_assets.sh             stage untracked/proprietary Docker inputs
@@ -521,7 +513,7 @@ tools/verify_image_assets.sh            fail early on missing/mismatched Docker 
 tools/test_npu.py, qnn_*_test.cpp       unit/integration harnesses
 docs/ARTIFACT_MANIFEST.sha256           hashes of validated untracked inputs
 docs/REPRODUCTION.md                    this file
-STATE.md                                session continuity + SCRFD-block evidence
+STATE.md                                session continuity + SCRFD NPU evidence (incl. the superseded "BLOCKED" record)
 README.md                               overview
 ```
 
@@ -550,3 +542,39 @@ code/ffclone/                           ffclone git repo (branches: main = pre-Q
   and the bookworm daemon binary are gitignored. A fresh clone must stage them
   with `tools/stage_image_assets.sh`; durable board copies live in
   `/home/buga/immich-ml-qnn/artifacts/`.
+
+---
+
+## 12. SCRFD on the NPU (resolved 2026-09-13 — supersedes the old "BLOCKED")
+
+**The old "SCRFD is blocked by firmware / missing Resize op-package" conclusion
+is invalid.** Its root cause was a **VTCM misconfiguration**, not the firmware:
+
+- Every Sept-5 SCRFD context binary silently carried `vtcm_size=4194304` (4 MB)
+  because the `HtpGraphConfig` name didn't match the graph name, so
+  `vtcm_size_in_mb=2` was dropped and the compiler defaulted to 4 MB. The
+  firmware rejects 4 MB VTCM (`Request feature vtcm size with value 4194304
+  unsupported`), which surfaced as `0x138d` — misread as an op-package failure.
+- Re-tested at a correctly pinned **2 MB** VTCM: a minimal single-op int8
+  `Resize` context **registers + loads**, and the **full SCRFD 640×640, 9
+  outputs, INT8 per-channel** context (`scrfd_6490_v2.bin`, 5.25 MB) registers,
+  loads and runs. Quality vs CPU float32 ORT (same preprocessed tensor,
+  insightface decode): IoU 0.984–0.996, max raw-tensor diff ≤ 0.043 on 0..1.
+- VTCM budget: 3 graphs × 2 MB = 6 MB of 8 MB total — verified resident
+  (all three contexts load and serve concurrently in production).
+
+**Production integration** (commit `a3155b3` and earlier):
+- daemon `scrfd` route: input `input.1` [1,3,640,640] + 9 outputs (score/bbox/
+  kps × 3 strides 8/16/32); tensor ids/scales/offsets from context metadata;
+  response = one concatenated float32 buffer of all 9 dequantized outputs in
+  ONNX graph order.
+- `QnnSession` routing key for detection (`buffalo_l`), per-item static-batch=1
+  loop, `np.concatenate` (NOT `np.stack`) for the batched recognition path →
+  [N,512]. CPU fallback per-session (sticky) if the daemon errors/times out/
+  returns a malformed response.
+- Verified E2E: 13-face photo → 13 flat-512 ArcFace embeddings through the NPU;
+  NPU SCRFD ≈ 62 ms vs CPU ≈ 2611 ms.
+
+**Lesson (apply to every context build):** after compiling, string-search the
+context binary for its embedded `vtcm_size=` and confirm it equals the intended
+pin — a silent `HtpGraphConfig` name mismatch is invisible in the compile log.
