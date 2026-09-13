@@ -35,4 +35,11 @@ RUN chmod +x /entrypoint-qnn.sh /opt/qnn/qnn_dsp_daemon \
 
 ENV IMMICH_ML_QNN_PORT=8089
 
+# Provenance: build with `--build-arg QNN_COMMIT=<git-rev>` so the running
+# image can be mapped back to the source tag/commit.
+ARG QNN_COMMIT=unknown
+LABEL org.opencontainers.image.revision="$QNN_COMMIT" \
+      org.opencontainers.image.version="immich-ml-qnn-3models" \
+      immich-ml-qnn.npu="clip,arcface,scrfd"
+
 ENTRYPOINT ["tini", "--", "/entrypoint-qnn.sh"]

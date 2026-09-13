@@ -164,7 +164,7 @@ class QnnSession:
             # contract mismatch) means the NPU path cannot serve this model;
             # degrade to CPU rather than breaking detection.
             raise _NpuUnavailable(f"daemon returned {exc.code} for {path}") from exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
             raise _NpuUnavailable(f"daemon unreachable for {path}: {exc}") from exc
 
     # ------------------------------------------------------- session protocol
@@ -224,7 +224,7 @@ class QnnSession:
                 f"QnnSession '{self.model_key}': falling back to CPU ONNX Runtime "
                 f"({self.model_path.name})"
             )
-            self._cpu = _ort.InferenceSession(str(self.model_path))
+            self._cpu = _ort.InferenceSession(str(self.model_path), providers=["CPUExecutionProvider"])
         return self._cpu
 
     def _cpu_run(self, chw: NDArray[np.float32]) -> list:
@@ -244,18 +244,26 @@ class QnnSession:
             try:
                 payload = np.ascontiguousarray(chw, dtype=np.float32).tobytes()
                 raw = self._post(f"/infer/{self.model_key}", payload)
-                flat = np.frombuffer(raw, dtype=np.float32)
-                if flat.size != sum(self._out_elems):
+                # A malformed/truncated response (bad length, not multiple of
+                # 4, wrong element count) is an NPU-path contract failure:
+                # degrade to CPU instead of leaking the error to the caller.
+                try:
+                    flat = np.frombuffer(raw, dtype=np.float32)
+                    if flat.size != sum(self._out_elems):
+                        raise _NpuUnavailable(
+                            f"unexpected response size {flat.size} "
+                            f"(expected {sum(self._out_elems)})"
+                        )
+                    outs = []
+                    off = 0
+                    for elems, shape in zip(self._out_elems, self._out_shapes):
+                        outs.append(flat[off : off + elems].copy().reshape(shape))
+                        off += elems
+                    return outs
+                except ValueError as exc:
                     raise _NpuUnavailable(
-                        f"unexpected response size {flat.size} "
-                        f"(expected {sum(self._out_elems)})"
-                    )
-                outs = []
-                off = 0
-                for elems, shape in zip(self._out_elems, self._out_shapes):
-                    outs.append(flat[off : off + elems].copy().reshape(shape))
-                    off += elems
-                return outs
+                        f"malformed daemon response for {self.model_key}: {exc}"
+                    ) from exc
             except _NpuUnavailable as exc:
                 self._npu_ok = False
                 log.warning(f"QnnSession '{self.model_key}': NPU path failed: {exc}")

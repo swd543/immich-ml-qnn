@@ -7,6 +7,23 @@
 set -e
 
 QNN_PORT="${IMMICH_ML_QNN_PORT:-8089}"
+DAEMON_PID=""
+PY_PID=""
+
+# Forward termination to whichever children exist, wait for the server, and
+# always stop the daemon before exiting. Without this, the daemon survives as
+# an orphan (and on SIGKILL-style stops is torn down mid-fastrpc-call — the
+# documented suspect for CDSP wedges that only a power cycle clears).
+cleanup() {
+  rc=$1
+  if [ -n "$PY_PID" ]; then kill "$PY_PID" 2>/dev/null || true; fi
+  if [ -n "$DAEMON_PID" ]; then kill "$DAEMON_PID" 2>/dev/null || true; fi
+  # Give the daemon its graceful-teardown window (context/device/backend free).
+  if [ -n "$DAEMON_PID" ]; then wait "$DAEMON_PID" 2>/dev/null || true; fi
+  exit "$rc"
+}
+trap 'cleanup 143' TERM
+trap 'cleanup 130' INT
 
 if [ -n "${IMMICH_ML_QNN_URL:-}" ]; then
   # The HTP backend resolves the DSP skel (libQnnHtpV68Skel.so) from the
@@ -22,7 +39,6 @@ if [ -n "${IMMICH_ML_QNN_URL:-}" ]; then
     --arcface-context /opt/qnn/models/arcface37v6_6490.bin \
     --scrfd-context /opt/qnn/models/scrfd_6490_v2.bin &
   DAEMON_PID=$!
-  trap 'kill "$DAEMON_PID" 2>/dev/null || true' TERM INT
 
   # Wait for the daemon (context binaries load in ~1-2 s).
   i=0
@@ -44,4 +60,14 @@ if [ -n "${IMMICH_ML_QNN_URL:-}" ]; then
   fi
 fi
 
-exec python -m immich_ml
+# Do NOT exec: this shell must stay alive to forward signals and stop the
+# daemon. Exit status = the ML server's.
+python -m immich_ml &
+PY_PID=$!
+wait "$PY_PID"
+rc=$?
+if [ -n "$DAEMON_PID" ]; then
+  kill "$DAEMON_PID" 2>/dev/null || true
+  wait "$DAEMON_PID" 2>/dev/null || true
+fi
+exit "$rc"

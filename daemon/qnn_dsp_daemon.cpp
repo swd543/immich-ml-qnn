@@ -193,6 +193,8 @@ static bool loadModel(const ModelSpec* spec, const std::string& path) {
   if (!QNNFN(graphRetrieve) || QNNFN(graphRetrieve)(m.ctx, spec->graphName, &m.graph) != QNN_SUCCESS) {
     logmsg("ERR", "graphRetrieve(%s) failed for %s — is the graph name right?", spec->graphName,
            path.c_str());
+    // Do not leak the context we just created.
+    if (m.ctx && QNNFN(contextFree)) QNNFN(contextFree)(m.ctx, nullptr);
     return false;
   }
 
@@ -492,8 +494,10 @@ int main(int argc, char** argv) {
   std::string clipCtx, clipGraph = "clipr37";
   std::string arcCtx, arcGraph = "arcface37";
   std::string scrCtx, scrGraph = "scrfd";
-  double clipInScale = -1, clipInOff = -1, clipOutScale = -1, clipOutOff = -1;
-  double arcInScale = -1, arcInOff = -1, arcOutScale = -1, arcOutOff = -1;
+  // NAN = "override not given"; -1 would be ambiguous with a legitimate
+  // (negative) offset value.
+  double clipInScale = NAN, clipInOff = NAN, clipOutScale = NAN, clipOutOff = NAN;
+  double arcInScale = NAN, arcInOff = NAN, arcOutScale = NAN, arcOutOff = NAN;
   uint32_t dataFormat = 1032;
 
   for (int i = 1; i < argc; ++i) {
@@ -526,7 +530,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (clipCtx.empty() && arcCtx.empty()) {
+  if (clipCtx.empty() && arcCtx.empty() && scrCtx.empty()) {
     usage(argv[0]);
     return 2;
   }
@@ -543,6 +547,8 @@ int main(int argc, char** argv) {
 
   signal(SIGTERM, onSignal);
   signal(SIGINT, onSignal);
+  // A half-closed client must not kill the daemon mid-response.
+  signal(SIGPIPE, SIG_IGN);
 
   // ---- load backend interface ----
   void* lib = dlopen(backend.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -602,14 +608,14 @@ int main(int argc, char** argv) {
   };
   ModelSpec scrSpec{"scrfd", scrGraph.c_str(), "input_1", "", {1, 3, 640, 640}, {1, 1},
                     0.0078125f, -128, 0.0f, 0, 1, 0, scrfdOuts, 9};
-  if (clipInScale > 0) clipSpec.inScale = static_cast<float>(clipInScale);
-  if (clipInOff > -0.5) clipSpec.inOffset = static_cast<int32_t>(clipInOff);
-  if (clipOutScale > 0) clipSpec.outScale = static_cast<float>(clipOutScale);
-  if (clipOutOff > -0.5) clipSpec.outOffset = static_cast<int32_t>(clipOutOff);
-  if (arcInScale > 0) arcSpec.inScale = static_cast<float>(arcInScale);
-  if (arcInOff > -0.5) arcSpec.inOffset = static_cast<int32_t>(arcInOff);
-  if (arcOutScale > 0) arcSpec.outScale = static_cast<float>(arcOutScale);
-  if (arcOutOff > -0.5) arcSpec.outOffset = static_cast<int32_t>(arcOutOff);
+  if (std::isfinite(clipInScale) && clipInScale > 0) clipSpec.inScale = static_cast<float>(clipInScale);
+  if (std::isfinite(clipInOff)) clipSpec.inOffset = static_cast<int32_t>(clipInOff);
+  if (std::isfinite(clipOutScale) && clipOutScale > 0) clipSpec.outScale = static_cast<float>(clipOutScale);
+  if (std::isfinite(clipOutOff)) clipSpec.outOffset = static_cast<int32_t>(clipOutOff);
+  if (std::isfinite(arcInScale) && arcInScale > 0) arcSpec.inScale = static_cast<float>(arcInScale);
+  if (std::isfinite(arcInOff)) arcSpec.inOffset = static_cast<int32_t>(arcInOff);
+  if (std::isfinite(arcOutScale) && arcOutScale > 0) arcSpec.outScale = static_cast<float>(arcOutScale);
+  if (std::isfinite(arcOutOff)) arcSpec.outOffset = static_cast<int32_t>(arcOutOff);
   gTensorDataFormat = dataFormat;
 
   // Load order = VTCM priority: CLIP + ArcFace (existing production models)
@@ -635,7 +641,10 @@ int main(int argc, char** argv) {
   struct sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(static_cast<uint16_t>(port));
-  if (inet_pton(AF_INET, bindAddr.c_str(), &addr.sin_addr) != 1) addr.sin_addr.s_addr = 0;
+  if (inet_pton(AF_INET, bindAddr.c_str(), &addr.sin_addr) != 1) {
+    logmsg("ERR", "invalid --bind address: %s", bindAddr.c_str());
+    return 1;
+  }
   if (bind(listenFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
       listen(listenFd, 16) != 0) {
     logmsg("ERR", "bind/listen on %s:%d failed", bindAddr.c_str(), port);
@@ -646,6 +655,25 @@ int main(int argc, char** argv) {
 
   logmsg("INFO", "shutting down");
   close(listenFd);
-  if (g_backend && QNNFN(backendFree)) QNNFN(backendFree)(g_backend);
+  // Tear down in dependency order: contexts (newest first), then device,
+  // then backend. Abrupt process death without this sequence is the
+  // documented suspect for CDSP wedges that require a power cycle.
+  for (auto it = g_models.rbegin(); it != g_models.rend(); ++it) {
+    if (it->ctx && QNNFN(contextFree)) {
+      Qnn_ErrorHandle_t e = QNNFN(contextFree)(it->ctx, nullptr);
+      logmsg("INFO", "contextFree(%s) = 0x%x", it->spec->key, (unsigned)e);
+    }
+    it->ctx = nullptr;
+  }
+  if (g_device && QNNFN(deviceFree)) {
+    Qnn_ErrorHandle_t e = QNNFN(deviceFree)(g_device);
+    logmsg("INFO", "deviceFree = 0x%x", (unsigned)e);
+    g_device = nullptr;
+  }
+  if (g_backend && QNNFN(backendFree)) {
+    Qnn_ErrorHandle_t e = QNNFN(backendFree)(g_backend);
+    logmsg("INFO", "backendFree = 0x%x", (unsigned)e);
+    g_backend = nullptr;
+  }
   return 0;
 }
