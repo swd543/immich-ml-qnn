@@ -406,3 +406,34 @@ The VTCM root-cause fix (above) led to the full SCRFD-on-NPU rollout:
   binary (port 8092 tests); `verify_image_assets.sh` no longer requires it
   for the image build. `.dockerignore` must keep `build-headers/` IN the
   context (the daemon-build stage copies it).
+
+## 2026-09-13 (evening) — face clustering correction (user ground truth)
+
+User flagged four self-portraits. Verified per photo (DB: `asset_face` +
+`face_search`, maxDistance default 0.5, minFaces 3 — no override in
+`/api/config`):
+
+- `IMG_20251001_004602_194` and `VideoCapture_20220910-210118`: within 0.40 of
+  the main cluster yet **unassigned** — stuck in *deferred* state (processed
+  during the import burst while the cluster was < minFaces; deferred faces are
+  only retried when NEW faces arrive). Fixed with the canonical force re-run
+  (`PUT /api/jobs/facialRecognition {"command":"start","force":true}`) —
+  cluster 26→29, unassigned 72→66. No person names existed, so nothing lost.
+- `VideoCapture_20230129-142157` / `-142200`: 0.556 / 0.546 to the cluster —
+  just over the 0.5 threshold (and the pair alone can't form a person,
+  minFaces=3). **User confirmed same person** as `VideoCapture_20220910` /
+  `VideoCapture_20240111` (both in-cluster). Immich has NO API to assign
+  unassigned faces to a person, so a per-entry-ID correction was applied
+  (same shape as the server's own assignment write; `face_search` untouched,
+  `person` has no counter columns):
+  - face `9cef192e-47c0-4183-b6cb-836871c81732` (…-142157) → personGroup `de29aedf-…`
+  - face `42651f44-0be5-4859-b7c3-9876145874b9` (…-142200) → personGroup `de29aedf-…`
+  Cluster 29→31, unassigned 66→64.
+- `IMG-20220115-WA0006`: 0.65 — WhatsApp-compressed 2022 frame, genuinely
+  beyond threshold. Left unassigned (correct behaviour).
+
+**Lessons:** (1) import bursts can leave good matches deferred — after a big
+import, a `force:true` facialRecognition re-run is the catch-up remedy (safe
+when no person names/favorites to lose). (2) For faces a hair over threshold,
+user ground-truth + per-face-ID `UPDATE "asset_face"` is the only supported-
+shaped fix — document the face IDs (done above) for rollback/audit.
