@@ -90,6 +90,22 @@ maxdiff 1.51 vs ORT for the ConvTranspose attempt). SCRFD's multi-scale anchor b
   bridge + accuracy validation); wait for Radxa to ship a newer QAIRT runtime with
   op-package support.
 
+### Addendum 2026-09-13 (QAIRT 2.42 data point)
+- Re-ran the ONNX→QNN conversion of the exact production detection model
+  (`/cache/facial-recognition/buffalo_l/detection/model.onnx`, 158 nodes) with QAIRT
+  **2.42.0** (x86_64 build host, py3.10 venv, onnx 1.15.0, `input.1` pinned
+  1,3,640,640): **conversion succeeds** (incl. 2 Resize + 4 Gather nodes) — i.e. the
+  graph-level op coverage is fine on the newer toolchain. The block is unchanged and
+  strictly at the firmware level: 2.42 context binaries are rejected by the board's
+  QNN interface cap (2.32), and the 2.37.1 path still hits the missing `Resize`
+  op-package (0x138d).
+- One untried rewrite remains: replace the 2 `Resize`(nearest 2×) nodes with
+  `Gather` over **static int index tensors** (row-then-column replication is exact —
+  no arithmetic, so no INT8 precision loss like the failed ConvTranspose attempt;
+  `Gather` is already in the model's op set). Whether the HTP v68 firmware provides a
+  registerable `Gather` op package is unknown — a minimal single-op int8 Gather context
+  would answer that in ~1 h if pursued (same wedge-safety protocol as the Resize probe).
+
 ### Ops notes
 - All QAIRT work moved off axiom tmpfs `/tmp` → `/home/buga/qairt/` (persistent, 22 GB):
   fresh 2.37.1 SDK at `sdk-237/`, work dir at `work/` (incl. `work/scrfd/` artifacts).
