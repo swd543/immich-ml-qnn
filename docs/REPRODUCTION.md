@@ -255,11 +255,18 @@ Key API details that cost real debugging time:
 The stock immich image is Debian 12 (glibc 2.36); the board's glibc is 2.39.
 A board-built binary fails in the image with `GLIBC_2.38 not found`. A
 `-static` build **segfaults** (static-glibc `dlopen` mismatch with the
-fastrpc runtime). So build inside a native aarch64 `debian:bookworm`
-container **on the board**:
+fastrpc runtime). **Since 2026-09-13 the image build compiles the daemon
+itself**: the Dockerfile's `daemon-build` stage is a native aarch64
+`debian:bookworm` (digest-pinned) container that runs the same g++ command —
+so the in-image binary always matches the committed source and no separate
+build step is needed.
+
+The standalone binary below (`daemon/qnn_dsp_daemon_bookworm`) is only for
+**board-side daemon probes** (running the daemon outside a container, e.g.
+probe contexts on port 8092):
 
 ```sh
-# on the board, from the repo checkout (~/immich-ml-qnn):
+# on the board, from the repo checkout (~/immich-ml-qnn) — probes only:
 docker run --rm -v "$PWD":/src -w /src debian:bookworm bash -c '
   apt-get update && apt-get install -y --no-install-recommends g++ &&
   g++ -O2 -std=c++17 -Wall -Ibuild-headers daemon/qnn_dsp_daemon.cpp \
@@ -293,18 +300,37 @@ The generated binary is deliberately not committed to this public repo.
 
 ```dockerfile
 # (abridged — full file in the repo root)
+# stage 1: compile the daemon in-image (BuildKit) against bookworm glibc 2.36
+FROM debian:bookworm@sha256:6ebd97fa83de... AS daemon-build
+RUN apt-get update && apt-get install -y --no-install-recommends g++ \
+    && rm -rf /var/lib/apt/lists/*
+COPY daemon/qnn_dsp_daemon.cpp ./qnn_dsp_daemon.cpp
+COPY build-headers/QNN ./build-headers/QNN   # staged (gitignored) input
+RUN g++ -O2 -std=c++17 -Wall -Wextra -Ibuild-headers qnn_dsp_daemon.cpp \
+    -o /out/qnn_dsp_daemon -ldl -pthread
+
+# stage 2: the production image
 ARG IMMICH_ML_BASE=ghcr.io/immich-app/immich-machine-learning@sha256:5a0839dc5303cd7215bcd2180a26aed3af41675aefb3e75e5157e9f10ad16e6e
 FROM ${IMMICH_ML_BASE}
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libyaml-0-2 libatomic1 && rm -rf /var/lib/apt/lists/*
 COPY immich_ml /usr/src/immich_ml          # patched package (base.py + sessions/qnn.py)
-COPY daemon/qnn_dsp_daemon_bookworm /opt/qnn/qnn_dsp_daemon
+COPY --from=daemon-build /out/qnn_dsp_daemon /opt/qnn/qnn_dsp_daemon
 COPY daemon/runtime/ /opt/qnn/runtime/     # Radxa v2.37.1 HTP runtime (libQnnHtp.so, skels, stub)
 COPY daemon/models/ /opt/qnn/models/       # clipr37_6490.bin + arcface37v6_6490.bin + scrfd_6490_v2.bin
 COPY docker/entrypoint-qnn.sh /entrypoint-qnn.sh
 ENV IMMICH_ML_QNN_PORT=8089
 ENTRYPOINT ["tini", "--", "/entrypoint-qnn.sh"]
 ```
+
+The daemon is compiled **in the image build** (BuildKit, `docker buildx`) so
+the binary in the image always matches the committed source; the previous
+two-step flow (scratch `docker run debian:bookworm` g++ step, then `docker
+build`) is gone. `docker build` on the board routes through BuildKit since
+2026-09-13 (buildx installed), so the `daemon-build` stage's apt layer is
+cached across rebuilds. A standalone `daemon/qnn_dsp_daemon_bookworm` binary
+is only for board-side daemon probes (outside a container) — it is no longer
+an image-build input.
 
 ### 7.1 Stage untracked image assets (required after every clean clone)
 

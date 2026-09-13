@@ -74,8 +74,9 @@ immich_ml/                  patched package (only models/base.py + sessions/qnn.
 tools/                      conversion, staging, verification and test tools
 
 generated / gitignored image inputs (not shipped by this public repo):
-build-headers/QNN/          QAIRT headers for the bookworm daemon build
-daemon/qnn_dsp_daemon_bookworm  aarch64 binary built against Debian 12 glibc
+build-headers/QNN/          QAIRT headers (daemon-build stage compiles against these)
+daemon/qnn_dsp_daemon_bookworm  OPTIONAL standalone binary (board probes only;
+                               the image build compiles the daemon itself)
 daemon/runtime/             Qualcomm HTP runtime (3 files)
 daemon/models/              generated INT8 contexts (clipr37_6490.bin, arcface37v6_6490.bin,
                                scrfd_6490_v2.bin)
@@ -90,22 +91,34 @@ the **build host** and copy them to the board exactly as documented in
 
 ```sh
 cd /home/buga/immich-ml-qnn
-docker run --rm -v "$PWD":/src -w /src debian:bookworm bash -c '
-  apt-get update && apt-get install -y --no-install-recommends g++ &&
-  g++ -O2 -std=c++17 -Wall -Wextra -Ibuild-headers daemon/qnn_dsp_daemon.cpp \
-    -o daemon/qnn_dsp_daemon_bookworm -ldl -pthread'
 tools/verify_image_assets.sh
+# One command: BuildKit (docker buildx) compiles the daemon in-image from
+# source against the staged QNN headers, then assembles the final image.
+# The g++ apt layer is cached across rebuilds.
 # QNN_COMMIT is the git rev of the source you built; it lands in an OCI label
 # so the running image maps back to its source tag/commit.
 docker build --build-arg QNN_COMMIT="$(git rev-parse HEAD)" -t immich-ml-qnn:local .
 ```
 
-The daemon is built against Debian 12 (bookworm) glibc 2.36 so it runs inside
-the pinned stock immich base image (also bookworm). The HTP stub needs
-`libyaml-0-2` and `libatomic1`, which the Dockerfile installs. The staging
-and verification scripts check the untracked header/runtime/context files
-against `docs/ARTIFACT_MANIFEST.sha256`; they never download or commit
+The daemon is compiled in-image against Debian 12 (bookworm) glibc 2.36 so it
+runs inside the pinned stock immich base image (also bookworm) — the binary
+in the image always matches the committed `daemon/qnn_dsp_daemon.cpp`. The HTP
+stub needs `libyaml-0-2` and `libatomic1`, which the Dockerfile installs. The
+staging and verification scripts check the untracked header/runtime/context
+files against `docs/ARTIFACT_MANIFEST.sha256`; they never download or commit
 Qualcomm SDK artifacts.
+
+Optional: a standalone board-test binary (`daemon/qnn_dsp_daemon_bookworm`,
+for running the daemon outside a container — probe contexts on port 8092) is
+no longer needed for the image build; build it the same way as before if
+wanted:
+
+```sh
+docker run --rm -v "$PWD":/src -w /src debian:bookworm bash -c '
+  apt-get update && apt-get install -y --no-install-recommends g++ &&
+  g++ -O2 -std=c++17 -Wall -Wextra -Ibuild-headers daemon/qnn_dsp_daemon.cpp \
+    -o daemon/qnn_dsp_daemon_bookworm -ldl -pthread'
+```
 
 ## Run
 
