@@ -383,3 +383,26 @@ The VTCM root-cause fix (above) led to the full SCRFD-on-NPU rollout:
   the immich container (cross-container!); (4) one multi-face /predict; (5)
   `docker stop` → five clean frees in logs → board ssh OK → `docker start` →
   models: 3 → repeat (4).
+
+## 2026-09-13 buildx — single-command image build (commits 5c2e4a3..454a8b6)
+
+- buildx 0.30.1 (BuildKit v0.26.2) is installed on the board. The image build
+  now **compiles the daemon in-image**: a digest-pinned `debian:bookworm`
+  `daemon-build` stage runs the same g++ command against the staged QNN
+  headers. One command — `docker build --build-arg QNN_COMMIT=<rev>` — no
+  more separate scratch `docker run debian:bookworm g++` step, and the
+  in-image daemon binary always matches the committed source (kills the
+  stale-staged-binary drift class).
+- Production image `immich-ml-qnn:local` = `sha256:d982aca68a77…` (revision
+  label `454a8b6…`); verified: 3 NPU models, 15-face predict all flat-512,
+  clean five-free teardown, lifecycle restart.
+- Rollback inventory: `rollback-a3155b3` = `6133792772…` (pre-hardening),
+  `rollback-20260913` = `49f714b2…`. Note: the a3155b3-generation image
+  (`b7a4c67e…`) was GC'd when the `local` tag moved (Docker prunes untagged
+  images at build time) — it is rebuildable from the tag
+  `npu-hardened-20260913`. **Always tag the live production image as a
+  rollback BEFORE rebuilding/retagging `local`.**
+- `daemon/qnn_dsp_daemon_bookworm` is now an OPTIONAL standalone board-probe
+  binary (port 8092 tests); `verify_image_assets.sh` no longer requires it
+  for the image build. `.dockerignore` must keep `build-headers/` IN the
+  context (the daemon-build stage copies it).
