@@ -28,7 +28,8 @@ ARG IMMICH_ML_BASE=ghcr.io/immich-app/immich-machine-learning@sha256:5a0839dc530
 FROM debian:bookworm@sha256:6ebd97fa83deb272194a2cf015b3d26a4d538e9ad3a7a79d544c8af5b0a01443 AS daemon-build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends g++ \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /out
 WORKDIR /src
 COPY daemon/qnn_dsp_daemon.cpp ./qnn_dsp_daemon.cpp
 COPY build-headers/QNN ./build-headers/QNN
