@@ -1,4 +1,7 @@
+# Excluded from the Docker build context. NOTE: build-headers/ is now
+# REQUIRED in the context — the daemon-build stage compiles
+# daemon/qnn_dsp_daemon.cpp against the staged QNN headers
+# (COPY build-headers/QNN). Do not re-add it.
 artifacts/
-build-headers/
 tools/
 *.md
