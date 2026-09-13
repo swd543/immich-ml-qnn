@@ -17,6 +17,11 @@
 # (daemon/qnn_dsp_daemon_bookworm) is no longer required for the image build —
 # only for running the daemon outside a container (probe contexts, port 8092).
 
+# Verified production base: Immich ML v3.1.0. Pin the digest so a rebuild does
+# not silently pick up a different moving `release` image.
+# Declared before the first FROM (BuildKit requires it for FROM resolution).
+ARG IMMICH_ML_BASE=ghcr.io/immich-app/immich-machine-learning@sha256:5a0839dc5303cd7215bcd2180a26aed3af41675aefb3e75e5157e9f10ad16e6e
+
 # ---------- stage: compile the NPU daemon (bookworm glibc) ------------------
 # Pinned bookworm digest (same glibc 2.36 as the base image below); the g++
 # apt layer is BuildKit-cached across rebuilds.
@@ -30,9 +35,7 @@ COPY build-headers/QNN ./build-headers/QNN
 RUN g++ -O2 -std=c++17 -Wall -Wextra -Ibuild-headers qnn_dsp_daemon.cpp \
     -o /out/qnn_dsp_daemon -ldl -pthread
 
-# Verified production base: Immich ML v3.1.0. Pin the digest so a rebuild does
-# not silently pick up a different moving `release` image.
-ARG IMMICH_ML_BASE=ghcr.io/immich-app/immich-machine-learning@sha256:5a0839dc5303cd7215bcd2180a26aed3af41675aefb3e75e5157e9f10ad16e6e
+# ---------- final: production image -----------------------------------------
 FROM ${IMMICH_ML_BASE}
 
 # Libraries the QNN HTP stub requires that the stock image lacks.
