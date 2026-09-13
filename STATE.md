@@ -242,3 +242,25 @@ The VTCM root-cause fix (above) led to the full SCRFD-on-NPU rollout:
   `docker run` mounts `/cache` **rw** (not ro); scratch daemons must be
   bound to 127.0.0.1 so `curl 127.0.0.1:port` inside the container does not
   traverse the docker bridge and hit the host.
+
+### 2026-09-13 incident: swap broke server→ML network (caught same day)
+- Recreating `immich-ml` via `docker run` WITHOUT `--network immich_default`
+  made the Immich server unable to reach `http://immich-ml:3003` → every ML
+  job failed with `fetch failed` (570 failures in ~30 min; faces/CLIP/OCR all
+  dead while uploads continued). In-container 127.0.0.1 E2E tests do NOT catch
+  this.
+- Fix (live, no downtime): `docker network connect immich_default immich-ml`.
+- **MANDATORY in every future swap `docker run`: `--network immich_default`.**
+- Post-swap verification MUST include, from the SERVER container:
+  `docker exec immich node -e "require('http').get('http://immich-ml:3003/ping', r => console.log(r.statusCode)).on('error', e => console.log(e.message))"`
+  → expect 200.
+- Backlog recovery: Immich v3 queues (redis prefix `immich_bull`, camelCase
+  names: `faceDetection`, `facialRecognition`, `smartSearch`, `ocr`) drain via
+  the UI "Queue all" buttons = jobs `AssetDetectFacesQueueAll`,
+  `SmartSearchQueueAll`, `OcrQueueAll` (data `{}`). Manual BullMQ 5.81
+  enqueue per job: `INCR <p>:<q>:id` → `HMSET <p>:<q>:<id> name <job> data
+  <json> opts '{"attemptsFailed":0,...}' timestamp <ms> delay 0 priority 0` →
+  `LPUSH <p>:<q>:wait <id>` → `ZADD <p>:<q>:marker 0 0` → `XADD <p>:<q>:events
+  * event waiting jobId <id>`. Failed-and-discarded jobs are NOT recoverable
+  from redis; re-enqueueing QueueAll covers them (server skips already-
+  processed assets).
