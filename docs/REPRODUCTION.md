@@ -376,7 +376,7 @@ the SDK copy, run it on the board with `--runtime-root
 ~/immich-ml-qnn/artifacts/board-runtime` after the headers/models have been
 copied, or replace only `daemon/runtime/` with that archived directory.
 
-### 7.2 The Python patch (upstream-mergeable, 201-line diff)
+### 7.2 The Python patch (upstream-mergeable, 2 files)
 
 Only two files differ from stock `immich-ml` v3.1.0
 (`upstream-diff.patch` in the repo root):

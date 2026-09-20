@@ -21,6 +21,13 @@
 - Docs updated (README "Build"/"Production swap", REPRODUCTION §7/§8):
   v1 instructions removed, Ubuntu apt install lines for both plugins, new
   "Tested stack" tables (board/kernel/docker/compose/buildx/QAIRT/images).
+- `upstream-diff.patch` regenerated (committed copy was corrupt: the qnn.py
+  new-file section had ` +`-prefixed lines → `git apply` failed with
+  "corrupt patch at line 330"). New copy verified: `git apply --check` clean
+  against the stock v3.1.0 image source and the post-apply tree is
+  byte-identical to the committed `immich_ml/`. Content unchanged (the
+  base.py hunks were already current); the patch is a reference artifact —
+  the Dockerfile builds from the committed `immich_ml/` source directly.
 
 ## DONE: Immich ML NPU integration (production)
 
