@@ -1,4 +1,26 @@
-# STATE (session continuity) — 2026-09-13
+# STATE (session continuity) — 2026-09-16
+
+## 2026-09-16 board Docker tooling: Compose v2 + buildx from Ubuntu packages
+
+- Removed the legacy Python compose package (`docker-compose` 1.29.2,
+  bundled in the RadxaOS image; no other package depends on it) and installed
+  the Ubuntu-provided `docker-compose-v2` 2.40.3+ds1-0ubuntu1~24.04.1 (single
+  Go binary, plugin at `/usr/libexec/docker/cli-plugins/docker-compose`) and
+  `docker-buildx` 0.30.1-0ubuntu1~24.04.1 (BuildKit v0.26.2). Board is
+  otherwise fully patched (empty `apt list --upgradable`).
+- Docker 29.1.3 (`docker.io 29.1.3-0ubuntu3~24.04.2`) was already current.
+- The `immich-ml` container is compose-managed with the QNN override
+  (`infra/immich/docker-compose.qnn.yml` in ffclone, `qnn` branch): device
+  `/dev/fastrpc-cdsp`, 4 host DSP-lib/device-tree mounts, `IMMICH_ML_QNN_URL`.
+  `immichctl` (ffclone) hard-requires Compose v2 and auto-injects the override
+  for `*qnn*` image names; the 2026-09-16 NPU audit found + fixed a CPU-only
+  regression (QNN runtime bits had lived in a manual `docker run`).
+- Live check: `docker compose version` → 2.40.3; `docker buildx version` →
+  0.30.1; immich-ml = `immich-ml-qnn:local` @ `454a8b6`, labels
+  `immich/immich-ml`, QNN env + device present.
+- Docs updated (README "Build"/"Production swap", REPRODUCTION §7/§8):
+  v1 instructions removed, Ubuntu apt install lines for both plugins, new
+  "Tested stack" tables (board/kernel/docker/compose/buildx/QAIRT/images).
 
 ## DONE: Immich ML NPU integration (production)
 

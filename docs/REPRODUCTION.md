@@ -326,9 +326,14 @@ ENTRYPOINT ["tini", "--", "/entrypoint-qnn.sh"]
 The daemon is compiled **in the image build** (BuildKit, `docker buildx`) so
 the binary in the image always matches the committed source; the previous
 two-step flow (scratch `docker run debian:bookworm` g++ step, then `docker
-build`) is gone. `docker build` on the board routes through BuildKit since
-2026-09-13 (buildx installed), so the `daemon-build` stage's apt layer is
-cached across rebuilds. A standalone `daemon/qnn_dsp_daemon_bookworm` binary
+build`) is gone. `docker build` on the board routes through BuildKit, so the
+`daemon-build` stage's apt layer is cached across rebuilds. Both plugins are
+Ubuntu apt packages (no Docker Inc. repository) — install them if missing:
+
+```sh
+sudo apt-get install -y docker-buildx docker-compose-v2
+docker buildx version   # github.com/docker/buildx 0.30.x (BuildKit v0.26.2)
+``` A standalone `daemon/qnn_dsp_daemon_bookworm` binary
 is only for board-side daemon probes (outside a container) — it is no longer
 an image-build input.
 
@@ -397,29 +402,23 @@ SCRFD detection and everything else stay on the ONNX Runtime path.
 
 ### 8.1 Container run (production)
 
-The board runs `docker-compose` **v1 (Python)**, which **cannot create
-containers** with the current docker daemon (`KeyError: 'ContainerConfig'`
-in `get_container_data_volumes`) — it can still *read* running ones. The
-production `immich-ml` container is therefore created with `docker run`,
-carrying the standard compose labels so it stays part of the `immich`
-project:
+The production `immich-ml` container is **compose-managed** (labels
+`com.docker.compose.project=immich`, `com.docker.compose.service=immich-ml`),
+recreated with Docker Compose **v2** via `immichctl` (ffclone infra repo,
+`qnn` branch). `immichctl` auto-injects the QNN override
+`infra/immich/docker-compose.qnn.yml` whenever `IMMICH_ML_IMAGE` matches
+`*qnn*` — it carries the CDSP device, the host DSP-lib mounts, and
+`IMMICH_ML_QNN_URL`; CPU hosts never load it, so the base compose file stays
+stock. Recreate with:
 
 ```sh
-docker run -d \
-  --name immich-ml \
-  --restart unless-stopped \
-  --network immich_default \
-  --network-alias immich-ml \
-  --label com.docker.compose.project=immich \
-  --label com.docker.compose.service=immich-ml \
-  -e IMMICH_ML_QNN_URL=http://127.0.0.1:8089 \
-  --device /dev/fastrpc-cdsp \
-  -v /proc/device-tree:/proc/device-tree:ro \
-  -v /usr/lib/dsp:/usr/lib/dsp:ro \
-  -v /usr/lib/aarch64-linux-gnu/libcdsprpc.so.1:/usr/lib/aarch64-linux-gnu/libcdsprpc.so.1:ro \
-  -v /usr/lib/aarch64-linux-gnu/libcdsprpc.so:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro \
-  -v /home/buga/FFclone/immich/media/cache:/cache:ro \
-  immich-ml-qnn:local
+~/bin/immichctl compose up -d immich-ml
+```
+
+Host tooling (Ubuntu packages, no Docker Inc. repository):
+
+```sh
+sudo apt-get install -y docker-compose-v2 docker-buildx
 ```
 
 Required mounts/devices, and why:
@@ -452,9 +451,26 @@ cd /home/buga/immich-ml-qnn/swap-backup
 cp stack.env /home/buga/FFclone/immich/config/stack.env
 cp docker-compose.yml /home/buga/code/ffclone/infra/immich/docker-compose.yml
 docker rm -f immich-ml          # named container only — never blanket docker rm
-# recreate with the stock image via the docker run command above minus the
-# QNN env/mounts (or restore the original compose service)
+# recreate with the stock image: point IMMICH_ML_IMAGE at the stock tag in
+# stack.env, then ~/bin/immichctl compose up -d immich-ml (the QNN override is
+# only injected for *qnn* image names)
 ```
+
+### 8.4 Tested stack
+
+This deployment was tested on:
+
+| Component | Version |
+|---|---|
+| Board | Radxa Dragon Q6A — QCS6490 (SM7325), aarch64 |
+| OS | RadxaOS — Ubuntu 24.04.5 LTS (noble) |
+| Kernel | `7.0.11-6-qcom` (Radxa) |
+| Docker | 29.1.3 (`docker.io 29.1.3-0ubuntu3~24.04.2`) |
+| Compose | v2.40.3 (`docker-compose-v2 2.40.3+ds1-0ubuntu1~24.04.1`, CLI plugin) |
+| Buildx | 0.30.1 (`docker-buildx 0.30.1-0ubuntu1~24.04.1`, BuildKit v0.26.2) |
+| QAIRT | 2.37.1.250807 (HTP runtime baked into the image) |
+| immich server | `ghcr.io/immich-app/immich-server@sha256:16512892…` (digest-pinned) |
+| immich-ml | `immich-ml-qnn:local` @ `454a8b6` (OCI label `org.opencontainers.image.revision`) |
 
 ---
 

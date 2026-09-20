@@ -87,7 +87,14 @@ daemon/models/              generated INT8 contexts (clipr37_6490.bin, arcface37
 A clean clone needs generated/proprietary image inputs staged before a Docker
 build. After producing the three contexts, stage the headers/runtime/models on
 the **build host** and copy them to the board exactly as documented in
-**`docs/REPRODUCTION.md` §7.1**. Then, on the board:
+**`docs/REPRODUCTION.md` §7.1**. Then, on the board — first make sure the
+Ubuntu-provided Docker plugins are in place (no Docker Inc. repository):
+
+```sh
+sudo apt-get install -y docker-compose-v2 docker-buildx
+```
+
+Then build:
 
 ```sh
 cd /home/buga/immich-ml-qnn
@@ -202,6 +209,22 @@ python3 -m unittest discover -s tests -v
 4. `stack.env`: `IMMICH_ML_IMAGE=immich-ml-qnn:local`.
 5. The service container was recreated.
 
+### Tested stack
+
+This setup (build + production swap) was tested on:
+
+| Component | Version |
+|---|---|
+| Board | Radxa Dragon Q6A — QCS6490 (SM7325), aarch64 |
+| OS | RadxaOS — Ubuntu 24.04.5 LTS (noble) |
+| Kernel | `7.0.11-6-qcom` (Radxa) |
+| Docker | 29.1.3 (`docker.io 29.1.3-0ubuntu3~24.04.2`) |
+| Compose | v2.40.3 (`docker-compose-v2 2.40.3+ds1-0ubuntu1~24.04.1`, CLI plugin) |
+| Buildx | 0.30.1 (`docker-buildx 0.30.1-0ubuntu1~24.04.1`, BuildKit v0.26.2) |
+| QAIRT | 2.37.1.250807 (HTP runtime baked into the image) |
+| immich server | `ghcr.io/immich-app/immich-server@sha256:16512892…` (digest-pinned) |
+| immich-ml | `immich-ml-qnn:local` @ `454a8b6` (OCI label `org.opencontainers.image.revision`) |
+
 ### Rollback
 
 ```sh
@@ -212,13 +235,23 @@ docker rm -f immich-ml
 cd /home/buga/code/ffclone/infra/immich && ~/bin/immichctl compose up -d immich-ml
 ```
 
-### Note: docker-compose v1 on this board
+### Compose tooling (board)
 
-This board runs `docker-compose` v1 (Python). The current docker daemon no
-longer returns a `ContainerConfig` field in `docker inspect <image>`, so
-compose v1 **crashes when it tries to *create* a container**
-(`KeyError: 'ContainerConfig'` in `get_container_data_volumes`). It still reads
-running containers fine. The `immich-ml` container was therefore created with
-`docker run` directly (with the standard compose labels so it stays part of the
-`immich` project). If you need to recreate it later, use the same `docker run`
-command as above, not `compose up`.
+Docker Compose **v2** (the `docker compose` CLI plugin) is required for
+(re)creating containers. On this board both plugins come from Ubuntu's own
+apt packages — no Docker Inc. repository:
+
+```sh
+sudo apt-get install -y docker-compose-v2 docker-buildx
+docker compose version   # Docker Compose version 2.40.x
+docker buildx version    # github.com/docker/buildx 0.30.x
+```
+
+`immichctl` (ffclone infra repo, `qnn` branch) selects the Compose
+implementation, hard-fails without v2, and auto-injects the QNN override
+(`infra/immich/docker-compose.qnn.yml`) whenever `IMMICH_ML_IMAGE` is a QNN
+build. Container recreation is therefore a single compose call:
+
+```sh
+~/bin/immichctl compose up -d immich-ml
+```
